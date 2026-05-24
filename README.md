@@ -102,6 +102,14 @@ aws-engineering-journey/
 │   │       ├── scaling-notes.md       # Ingestion boundaries research
 │   │       └── cost-analysis.md       # Cost optimization comparison models
 │   │
+│   ├── stateful-vs-stateless-auth/    # Cognito Stateful vs Stateless Auth (Completed)
+│   │   ├── README.md                  # Detailed testing & architecture guide
+│   │   ├── scripts/                   # Automated script resources
+│   │   │   ├── cognito_user_injection.py  # Bypasses verification & injects users
+│   │   │   └── integration_burst_test.py  # Parallel multi-threaded scaling test
+│   │   └── docs/                      # Technical documentation
+│   │       └── architecture-notes.md  # Deep JWKS signature vs Redis cache comparison
+│   │
 │   └── api-gateway-transformations/   # Edge request/response VTL mapping templates (Planned)
 │
 └── reusable/                          # Common Cloud Infrastructures
