@@ -1,45 +1,90 @@
-# AWS Engineering Journey
+# ☁️ AWS Engineering Journey
 
-Welcome to the **AWS Engineering Journey** repository. This repository serves as a highly organized personal engineering catalog containing production-ready serverless architectures, infrastructural templates, load-testing benchmarks, and cost analysis case studies on Amazon Web Services.
-
-The primary objective is to document advanced architectural solutions, comparative design performance, and deployment blueprints for microservices.
+> Building production-grade cloud systems, distributed architectures, AI-powered applications, and real-world AWS engineering projects — one system at a time.
 
 ---
 
-## 📂 Repository Structure
+# 🚀 About This Repository
 
-```
+This repository is my long-term cloud engineering lab focused on:
+
+- AWS Certifications
+- Real-world architecture implementation
+- Distributed systems
+- Serverless engineering
+- Event-driven systems
+- Performance engineering
+- DevOps & CloudOps
+- AI/ML & Generative AI
+- Reliability engineering
+- Scalability benchmarking
+- Production-grade system design
+
+Instead of only studying theory, every AWS skill is mapped to hands-on projects, experiments, architecture breakdowns, and benchmarking exercises.
+
+---
+
+# 🎯 Current Goals
+
+- ✅ AWS Certified Cloud Practitioner
+- 🚧 AWS Developer Associate (DVA-C02)
+- 🚧 AWS Solutions Architect Associate (SAA-C03)
+- 🚧 AWS SysOps Administrator Associate (SOA-C03)
+- 🔜 AWS Machine Learning Associate
+- 🔜 AWS Generative AI Engineer Professional
+- 🎯 AWS Golden Jacket Journey
+- 🎯 Build production-grade cloud engineering portfolio
+- 🎯 Remote Cloud/DevOps/Platform Engineering opportunities
+
+---
+
+# 🧠 Core Engineering Areas
+
+## ☁️ Cloud & Serverless
+- AWS Lambda
+- API Gateway
+- Step Functions
+- EventBridge
+- SQS/SNS
+- DynamoDB
+- S3
+
+## 🏗️ Architecture & System Design
+- Event-driven systems
+- Microservices
+- High availability
+- Fault tolerance
+- Disaster recovery
+- Scalability patterns
+- Multi-region architectures
+
+## ⚙️ DevOps & CloudOps
+- CI/CD
+- Infrastructure as Code
+- Monitoring
+- Observability
+- Auto-remediation
+- Load testing
+- Cost optimization
+
+## 🤖 AI / ML / Generative AI
+- Bedrock
+- SageMaker
+- RAG pipelines
+- AI agents
+- Vector databases
+- AI event-driven workflows
+
+---
+
+# 📂 Repository Structure
+
+```bash
 aws-engineering-journey/
-├── README.md                          # Root Catalog & Repository Index
 │
-├── projects/                          # Case Study Implementations
-│   └── sync-vs-async-upload/          # Synchronous vs SQS Decoupled File Ingestion
-│       ├── lambda/                    # AWS Lambda Codebases
-│       ├── cloudformation/            # Infrastructure-as-Code (SAM) templates
-│       ├── load-testing/              # Comparative Locust Stress-Test scripts
-│       ├── frontend/                  # Unified Performance Uploader Dashboard
-│       └── docs/                      # Scaling & Cost mathematical models
-│
-└── reusable/                          # Common Infrastructure Blueprints
-    ├── cloudformation/                # Standard VPC, IAM & KMS Skeletons (Planned)
-    └── scripts/                       # Deployment pipelines and helper scripts (Planned)
-```
-
----
-
-## 🚀 Active Case Studies
-
-### 1. [Sync vs. Async Ingestion Performance](file:///Users/emperor/Documents/aws-engineering-journey/projects/sync-vs-async-upload/README.md)
-* **Goal**: Benchmark structural differences between standard synchronous direct Lambda uploads and asynchronous, non-blocking SQS ingestion.
-* **Key Components**: S3 storage buckets, API Gateway direct service integrations, Amazon SQS buffering queues, concurrent Python Lambda batch processors, a stunning glassmorphism uploader client, and Locust load testing profiles.
-* **Case Study Status**: **Completed & Fully Documented**.
-
----
-
-## 🛠️ Future Case Studies (Planned)
-
-These projects will be initialized and populated as they are built:
-
-* **Lambda Error Handling & Resiliency**: Dead Letter Queues (DLQ), Lambda Destinations, and Step Functions error retries/fallbacks.
-* **DynamoDB Hot Partitioning Mitigations**: Architectural strategies to resolve read/write throughput throttles on active key partitions.
-* **API Gateway Transformations**: Edge request/response mapping templates using Apache Velocity Template Language (VTL) to decouple client schemas from internal models.
+├── projects/
+├── reusable/
+├── benchmarking/
+├── docs/
+├── experiments/
+└── portfolio/
