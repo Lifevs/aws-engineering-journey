@@ -86,28 +86,25 @@ aws-engineering-journey/
 ├── README.md                          # Repository Index & Learning Goals
 │
 ├── projects/                          # Production-grade Case Studies
-│   └── sync-vs-async-upload/          # Sync vs Decoupled SQS File Ingestion
-│       ├── README.md                  # Deployment & setup guide
-│       ├── lambda/                    # AWS Lambda source code
-│       │   ├── sync_lambda.py         # Sync parser Lambda
-│       │   └── async_lambda.py        # SQS async consumer Lambda
-│       ├── cloudformation/            # SAM Infrastructure-as-Code templates
-│       │   └── template.yaml          # S3, SQS, Lambdas & API Gateway Direct integration
-│       ├── load-testing/              # Stress-test benchmarks
-│       │   ├── locustfile.py          # Combined Locust weight script
-│       │   └── sample_test.jpg        # Standard test image
-│       ├── frontend/                  # Unified Uploader Web Client
-│       │   └── upload.html            # Premium glassmorphism client
-│       └── docs/                      # Scientific documentation
-│           ├── scaling-notes.md       # Ingestion boundaries research
-│           └── cost-analysis.md       # Cost optimization comparison models
+│   ├── sync-vs-async-upload/          # Sync vs Decoupled SQS File Ingestion (Completed)
+│   │   ├── README.md                  # Deployment & setup guide
+│   │   ├── lambda/                    # AWS Lambda source code
+│   │   │   ├── sync_lambda.py         # Sync parser Lambda
+│   │   │   └── async_lambda.py        # SQS async consumer Lambda
+│   │   ├── cloudformation/            # SAM Infrastructure-as-Code templates
+│   │   │   └── template.yaml          # S3, SQS, Lambdas & API Gateway Direct integration
+│   │   ├── load-testing/              # Stress-test benchmarks
+│   │   │   ├── locustfile.py          # Combined Locust weight script
+│   │   │   └── sample_test.jpg        # Standard test image
+│   │   ├── frontend/                  # Unified Uploader Web Client
+│   │   │   └── upload.html            # Premium glassmorphism client
+│   │   └── docs/                      # Scientific documentation
+│   │       ├── scaling-notes.md       # Ingestion boundaries research
+│   │       └── cost-analysis.md       # Cost optimization comparison models
+│   │
+│   └── api-gateway-transformations/   # Edge request/response VTL mapping templates (Planned)
 │
-├── reusable/                          # Common Cloud Infrastructures
-│   ├── cloudformation/                # Standard VPC, IAM & KMS Skeletons (Planned)
-│   └── scripts/                       # Deployment pipelines and helper scripts (Planned)
-│
-├── benchmarking/                      # High-scale load testing benchmarks (Planned)
-├── docs/                              # Global architecture notes & reference charts
-├── experiments/                       # One-off cloud sandbox experiments (Planned)
-└── portfolio/                         # Professional highlights and certifications (Planned)
+└── reusable/                          # Common Cloud Infrastructures
+    ├── cloudformation/                # Standard VPC, IAM & KMS Skeletons (Planned)
+    └── scripts/                       # Deployment pipelines and helper scripts (Planned)
 ```
