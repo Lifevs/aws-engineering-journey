@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AWS Upload Performance Benchmark: Sync vs Async</title>
+    
+    <!-- Premium Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-color: #0b0c10;
+            --card-bg: rgba(31, 38, 52, 0.45);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #f5f6f8;
+            --text-secondary: #94a3b8;
+            
+            /* Gradient Palettes */
+            --accent-sync: linear-gradient(135deg, #ec4899, #f43f5e); /* Rose/Red */
+            --accent-async: linear-gradient(135deg, #00f2fe, #4facfe); /* Cyan/Blue */
+            --accent-glow-sync: rgba(244, 63, 94, 0.15);
+            --accent-glow-async: rgba(79, 172, 254, 0.15);
+            
+            --success-color: #10b981;
+            --warning-color: #f59e0b;
+            --danger-color: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(at 10% 20%, rgba(244, 63, 94, 0.05) 0px, transparent 50%),
+                radial-gradient(at 90% 80%, rgba(79, 172, 254, 0.08) 0px, transparent 50%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow-x: hidden;
+            padding: 2rem 1rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 2.5rem;
+            max-width: 800px;
+            animation: fadeIn 0.8s ease-out;
+        }
+
+        h1 {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 2.5rem;
+            font-weight: 800;
+            letter-spacing: -0.05em;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(to right, #f5f6f8, #94a3b8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            line-height: 1.6;
+        }
+
+        .badge-container {
+            display: flex;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .badge {
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--border-color);
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-family: 'Space Grotesk', sans-serif;
+            color: var(--text-secondary);
+        }
+
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 2rem;
+            width: 100%;
+            max-width: 1200px;
+            animation: slideUp 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @media (min-width: 992px) {
+            .main-container {
+                grid-template-columns: 1.2fr 0.8fr;
+            }
+        }
+
+        /* Glassmorphism Card Style */
+        .glass-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 2rem;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .glass-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: transparent;
+            transition: background 0.3s ease;
+        }
+
+        .glass-card.sync-active::before {
+            background: var(--accent-sync);
+        }
+
+        .glass-card.async-active::before {
+            background: var(--accent-async);
+        }
+
+        .section-title {
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Strategy Switcher Tab design */
+        .strategy-tabs {
+            display: flex;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 0.35rem;
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            margin-bottom: 2rem;
+        }
+
+        .tab-btn {
+            flex: 1;
+            background: transparent;
+            border: none;
+            padding: 0.75rem;
+            color: var(--text-secondary);
+            font-family: 'Space Grotesk', sans-serif;
+            font-weight: 600;
+            font-size: 0.95rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .tab-btn.active[data-strategy="sync"] {
+            background: var(--accent-sync);
+            color: white;
+            box-shadow: 0 4px 15px var(--accent-glow-sync);
+        }
+
+        .tab-btn.active[data-strategy="async"] {
+            background: var(--accent-async);
+            color: #0b0c10;
+            box-shadow: 0 4px 15px var(--accent-glow-async);
+        }
+
+        /* Drag & Drop Zone */
+        .upload-zone {
+            border: 2px dashed rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: rgba(0, 0, 0, 0.15);
+            position: relative;
+        }
+
+        .upload-zone:hover {
+            border-color: rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .upload-zone.dragover {
+            border-color: #4facfe;
+            background: var(--accent-glow-async);
+            transform: scale(0.99);
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            display: inline-block;
+            transition: transform 0.3s ease;
+        }
+
+        .upload-zone:hover .upload-icon {
+            transform: translateY(-5px);
+        }
+
+        .upload-text {
+            font-size: 1.05rem;
+            color: var(--text-primary);
+            font-weight: 500;
+            margin-bottom: 0.25rem;
+        }
+
+        .upload-hint {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        /* Selected File Card */
+        .file-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1.5rem;
+            display: none;
+            align-items: center;
+            gap: 1rem;
+            animation: fadeIn 0.3s ease-out;
+        }
+
+        .file-icon {
+            font-size: 2rem;
+        }
+
+        .file-details {
+            flex-grow: 1;
+            overflow: hidden;
+        }
+
+        .file-name {
+            font-weight: 600;
+            font-size: 0.95rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .file-size {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 0.1rem;
+        }
+
+        .size-badge {
+            font-size: 0.75rem;
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-weight: 600;
+            margin-left: 0.5rem;
+        }
+
+        .size-badge.pass {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--success-color);
+        }
+
+        .size-badge.warning {
+            background: rgba(245, 158, 11, 0.15);
+            color: var(--warning-color);
+        }
+
+        .size-badge.error {
+            background: rgba(239, 68, 68, 0.15);
+            color: var(--danger-color);
+        }
+
+        .upload-actions {
+            margin-top: 2rem;
+        }
+
+        .action-btn {
+            width: 100%;
+            padding: 1rem;
+            border: none;
+            border-radius: 12px;
+            font-family: 'Space Grotesk', sans-serif;
+            font-weight: 700;
+            font-size: 1.1rem;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .action-btn[data-strategy="sync"] {
+            background: var(--accent-sync);
+            box-shadow: 0 4px 20px rgba(244, 63, 94, 0.25);
+        }
+
+        .action-btn[data-strategy="sync"]:hover:not(:disabled) {
+            box-shadow: 0 6px 24px rgba(244, 63, 94, 0.4);
+            transform: translateY(-2px);
+        }
+
+        .action-btn[data-strategy="async"] {
+            background: var(--accent-async);
+            color: #0b0c10;
+            box-shadow: 0 4px 20px rgba(79, 172, 254, 0.25);
+        }
+
+        .action-btn[data-strategy="async"]:hover:not(:disabled) {
+            box-shadow: 0 6px 24px rgba(79, 172, 254, 0.40);
+            transform: translateY(-2px);
+        }
+
+        .action-btn:disabled {
+            background: rgba(255, 255, 255, 0.08) !important;
+            color: rgba(255, 255, 255, 0.25) !important;
+            box-shadow: none !important;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 6px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 999px;
+            margin-top: 1rem;
+            overflow: hidden;
+            display: none;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            border-radius: 999px;
+            transition: width 0.3s ease;
+        }
+
+        .sync-active .progress-bar {
+            background: var(--accent-sync);
+        }
+
+        .async-active .progress-bar {
+            background: var(--accent-async);
+        }
+
+        /* Output Logs Console */
+        .console-container {
+            margin-top: 2rem;
+        }
+
+        .console-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        .console-box {
+            background: #000000;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+            font-family: monospace;
+            font-size: 0.85rem;
+            min-height: 140px;
+            max-height: 250px;
+            overflow-y: auto;
+            color: #00ff66;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.8);
+        }
+
+        .status-msg {
+            font-size: 0.95rem;
+            font-weight: 600;
+            margin-top: 1rem;
+            text-align: center;
+            color: var(--warning-color);
+        }
+
+        /* Sidebar - Comparison Matrix */
+        .comparison-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .stat-card {
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.25rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .stat-icon {
+            font-size: 1.75rem;
+            width: 48px;
+            height: 48px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+        }
+
+        .stat-info {
+            flex-grow: 1;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+        }
+
+        .stat-value {
+            font-size: 1.2rem;
+            font-weight: 700;
+            margin-top: 0.1rem;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        .stat-desc {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 0.2rem;
+        }
+
+        .metric-comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+            margin-top: 0.5rem;
+        }
+
+        .metric-cell {
+            padding: 0.4rem;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            text-align: center;
+        }
+
+        .metric-cell.sync {
+            background: rgba(244, 63, 94, 0.08);
+            border: 1px solid rgba(244, 63, 94, 0.15);
+            color: #f43f5e;
+        }
+
+        .metric-cell.async {
+            background: rgba(79, 172, 254, 0.08);
+            border: 1px solid rgba(79, 172, 254, 0.15);
+            color: #4facfe;
+        }
+
+        .card-footer {
+            margin-top: 1rem;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            border-top: 1px solid var(--border-color);
+            padding-top: 1rem;
+            line-height: 1.5;
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .pulse-glow {
+            animation: pulse 2s infinite alternate;
+        }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 10px rgba(0, 242, 254, 0.15); }
+            100% { box-shadow: 0 0 25px rgba(0, 242, 254, 0.35); }
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="badge">AWS Cloud Engineering Suite</div>
+        <h1 style="margin-top: 0.75rem;">Sync vs Async Upload Ingestion</h1>
+        <p class="subtitle" style="margin-top: 0.5rem;">Stress-testing payload integration structures, connection bottlenecks, and cost scaling strategies side-by-side using real-world endpoints.</p>
+        
+        <div class="badge-container">
+            <span class="badge">S3 Storage Bucket</span>
+            <span class="badge">API Gateway</span>
+            <span class="badge">SQS Queuing</span>
+            <span class="badge">AWS Lambda</span>
+        </div>
+    </header>
+
+    <div class="main-container">
+        
+        <!-- Main Control Card -->
+        <main class="glass-card sync-active" id="uploaderCard">
+            <div class="section-title">
+                <span style="font-size: 1.75rem;">⚡</span>
+                <h2>Upload Strategy Execution</h2>
+            </div>
+
+            <!-- Strategy Selection Tabs -->
+            <div class="strategy-tabs">
+                <button class="tab-btn active" data-strategy="sync" onclick="setStrategy('sync')">
+                    <span>🔴</span> Synchronous (Proxy)
+                </button>
+                <button class="tab-btn" data-strategy="async" onclick="setStrategy('async')">
+                    <span>🔵</span> Asynchronous (SQS)
+                </button>
+            </div>
+
+            <!-- Drag & Drop Uploader -->
+            <div class="upload-zone" id="dropZone" onclick="triggerFileSelect()">
+                <span class="upload-icon">📤</span>
+                <p class="upload-text">Drag & drop your file here or click to browse</p>
+                <p class="upload-hint" id="strategyLimitHint">Supported files: Image/Binary (Lambda direct, max 6MB)</p>
+                <input type="file" id="fileInput" onchange="handleFileSelect(event)">
+            </div>
+
+            <!-- Selected File Card -->
+            <div class="file-card" id="fileCard">
+                <span class="file-icon" id="fileIcon">📄</span>
+                <div class="file-details">
+                    <div style="display: flex; align-items: center;">
+                        <span class="file-name" id="fileName">sample-data.json</span>
+                        <span class="size-badge" id="sizeBadge">0 KB</span>
+                    </div>
+                    <div class="file-size" id="fileStatusMessage">File is fully ready for processing.</div>
+                </div>
+            </div>
+
+            <!-- Upload Execution Actions -->
+            <div class="upload-actions">
+                <button class="action-btn" id="execBtn" data-strategy="sync" onclick="executeUpload()" disabled>
+                    <span>Execute Upload Pipeline</span>
+                </button>
+                
+                <div class="progress-bar-container" id="progressContainer">
+                    <div class="progress-bar" id="progressBar"></div>
+                </div>
+                
+                <div class="status-msg" id="statusMessage">Waiting for file upload trigger...</div>
+            </div>
+
+            <!-- Console Log Output -->
+            <div class="console-container">
+                <div class="console-header">
+                    <span>SYSTEM EXECUTION CONSOLE</span>
+                    <span style="cursor: pointer; color: #4facfe;" onclick="clearConsole()">Clear Console</span>
+                </div>
+                <div class="console-box" id="consoleBox">{ "System": "Ready to initiate AWS network transfers. Select a file above." }</div>
+            </div>
+        </main>
+
+        <!-- Sidebar Panel: Comparison Matrix -->
+        <aside class="comparison-panel">
+            
+            <!-- Target Endpoint Details -->
+            <div class="glass-card">
+                <div class="section-title">
+                    <span style="font-size: 1.5rem;">🔗</span>
+                    <h3 style="font-size: 1.25rem;">AWS Gateway Routes</h3>
+                </div>
+                
+                <div class="stat-info" style="margin-bottom: 1.25rem;">
+                    <div class="stat-label">Sync Endpoint</div>
+                    <div class="stat-value" style="font-size: 0.85rem; font-family: monospace; word-break: break-all; color: #f43f5e; margin-top: 0.25rem;">
+                        https://b30ijpvseml4.execute-api.ap-south-1.amazonaws.com/dev/sync
+                    </div>
+                </div>
+                
+                <div class="stat-info">
+                    <div class="stat-label">SQS Async Endpoint</div>
+                    <div class="stat-value" style="font-size: 0.85rem; font-family: monospace; word-break: break-all; color: #4facfe; margin-top: 0.25rem;">
+                        https://b30ijpvml4.execute-api.ap-south-1.amazonaws.com/prod/async
+                    </div>
+                </div>
+                
+                <div class="card-footer">
+                    ℹ️ Endpoints reflect your actual deployed AWS API resources. The async pipeline queues workloads directly into Amazon SQS for back-end extraction, bypassing Lambda execution latency during the ingestion gate.
+                </div>
+            </div>
+
+            <!-- Architecture Comparison Card -->
+            <div class="glass-card">
+                <div class="section-title">
+                    <span style="font-size: 1.5rem;">📊</span>
+                    <h3 style="font-size: 1.25rem;">Pipeline Benchmarks</h3>
+                </div>
+
+                <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+                    <!-- Metric Block 1 -->
+                    <div>
+                        <div class="stat-label">Ingestion Architecture</div>
+                        <div class="metric-comparison">
+                            <div class="metric-cell sync">Direct (Blocking)</div>
+                            <div class="metric-cell async">Buffered (Non-Blocking)</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Metric Block 2 -->
+                    <div>
+                        <div class="stat-label">Payload Limitations</div>
+                        <div class="metric-comparison">
+                            <div class="metric-cell sync">Max 10MB Gateway / 6MB Lambda</div>
+                            <div class="metric-cell async">Max 256KB Queue payload</div>
+                        </div>
+                        <div class="stat-desc">Async relies on inline Base64 conversion; larger files should use S3 Pre-signed URLs directly.</div>
+                    </div>
+
+                    <!-- Metric Block 3 -->
+                    <div>
+                        <div class="stat-label">Infrastructure Scaling Behavior</div>
+                        <div class="metric-comparison">
+                            <div class="metric-cell sync">High Concurrency Spikes</div>
+                            <div class="metric-cell async">Rate-Limited Dequeuing</div>
+                        </div>
+                        <div class="stat-desc">Direct sync uploads trigger concurrent Lambdas; SQS queues absorb spikes seamlessly.</div>
+                    </div>
+                    
+                    <!-- Metric Block 4 -->
+                    <div>
+                        <div class="stat-label">Ingestion Latency Performance</div>
+                        <div class="metric-comparison">
+                            <div class="metric-cell sync">Network Upload + S3 time</div>
+                            <div class="metric-cell async">Instantly Queued (&lt;50ms)</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+        </aside>
+
+    </div>
+
+    <script>
+        let currentStrategy = 'sync';
+        let selectedFile = null;
+
+        // Constants
+        const SYNC_URL = "https://b30ijpvseml4.execute-api.ap-south-1.amazonaws.com/dev/sync";
+        const ASYNC_URL = "https://b30ijpvml4.execute-api.ap-south-1.amazonaws.com/prod/async";
+
+        // DOM elements
+        const uploaderCard = document.getElementById('uploaderCard');
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileCard = document.getElementById('fileCard');
+        const fileName = document.getElementById('fileName');
+        const sizeBadge = document.getElementById('sizeBadge');
+        const fileStatusMessage = document.getElementById('fileStatusMessage');
+        const fileIcon = document.getElementById('fileIcon');
+        const execBtn = document.getElementById('execBtn');
+        const statusMessage = document.getElementById('statusMessage');
+        const consoleBox = document.getElementById('consoleBox');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const strategyLimitHint = document.getElementById('strategyLimitHint');
+
+        // Drag and drop event listeners
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                dropZone.classList.add('dragover');
+            }, false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                dropZone.classList.remove('dragover');
+            }, false);
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files.length > 0) {
+                fileInput.files = files;
+                handleFile(files[0]);
+            }
+        });
+
+        function triggerFileSelect() {
+            fileInput.click();
+        }
+
+        function handleFileSelect(e) {
+            const files = e.target.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        }
+
+        function setStrategy(strategy) {
+            currentStrategy = strategy;
+            
+            // Toggle active classes on card border
+            uploaderCard.classList.remove('sync-active', 'async-active');
+            uploaderCard.classList.add(`${strategy}-active`);
+            
+            // Toggle tab active statuses
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.strategy === strategy);
+            });
+            
+            // Update action button state attribute
+            execBtn.setAttribute('data-strategy', strategy);
+            
+            // Update limits hint text
+            if (strategy === 'sync') {
+                strategyLimitHint.innerText = "Supported files: Image/Binary (Lambda direct, max 6MB)";
+            } else {
+                strategyLimitHint.innerText = "Supported files: Image/Text (SQS conversion, strictly max 150KB)";
+            }
+
+            logToConsole(`Switched active environment pipeline to: ${strategy.toUpperCase()} mode.`);
+            
+            if (selectedFile) {
+                validateFileForStrategy(selectedFile);
+            }
+        }
+
+        function handleFile(file) {
+            selectedFile = file;
+            fileName.innerText = file.name;
+            
+            // Format sizes nicely
+            const sizeInKb = (file.size / 1024).toFixed(1);
+            sizeBadge.innerText = `${sizeInKb} KB`;
+            
+            // Determine icon based on file type
+            if (file.type.startsWith('image/')) {
+                fileIcon.innerText = "🖼️";
+            } else if (file.type.startsWith('text/') || file.name.endsWith('.json') || file.name.endsWith('.yaml') || file.name.endsWith('.yml')) {
+                fileIcon.innerText = "📄";
+            } else {
+                fileIcon.innerText = "📦";
+            }
+            
+            fileCard.style.display = 'flex';
+            validateFileForStrategy(file);
+        }
+
+        function validateFileForStrategy(file) {
+            const sizeInKb = file.size / 1024;
+            let isValid = true;
+            let warningText = "";
+            
+            sizeBadge.className = "size-badge";
+
+            if (currentStrategy === 'sync') {
+                if (sizeInKb > 6000) {
+                    isValid = false;
+                    sizeBadge.classList.add('error');
+                    warningText = "⚠️ CRITICAL: File exceeds the 6MB direct synchronous Lambda payload limit!";
+                    logToConsole(`Warning: ${file.name} is too large for Synchronous Lambda. Size: ${sizeInKb.toFixed(1)} KB`);
+                } else {
+                    sizeBadge.classList.add('pass');
+                    warningText = "🟢 File meets synchronous direct upload requirements.";
+                }
+            } else {
+                // SQS 256KB total base64 threshold check. Recommending max 150KB image files
+                if (sizeInKb > 150) {
+                    isValid = false;
+                    sizeBadge.classList.add('error');
+                    warningText = "⚠️ CRITICAL: File is too large for direct inline SQS queuing. Max 150KB recommended.";
+                    logToConsole(`Warning: ${file.name} is too large for inline SQS encoding. Limit: 150KB. File size: ${sizeInKb.toFixed(1)} KB`);
+                } else {
+                    sizeBadge.classList.add('pass');
+                    warningText = "🟢 File satisfies direct SQS base64 payload constraints.";
+                }
+            }
+
+            fileStatusMessage.innerText = warningText;
+            fileStatusMessage.style.color = isValid ? "var(--text-secondary)" : "var(--danger-color)";
+            execBtn.disabled = !isValid;
+            statusMessage.innerText = isValid ? "Ready to run performance benchmark." : "Invalid file configuration for the selected strategy.";
+            statusMessage.style.color = isValid ? "var(--text-primary)" : "var(--danger-color)";
+        }
+
+        async function executeUpload() {
+            if (!selectedFile) return;
+
+            // Reset UI state
+            execBtn.disabled = true;
+            progressContainer.style.display = 'block';
+            progressBar.style.width = '0%';
+            statusMessage.innerText = `Connecting to AWS via ${currentStrategy.toUpperCase()} pathway...`;
+            statusMessage.style.color = "var(--warning-color)";
+            
+            const startTime = performance.now();
+            logToConsole(`\n[${new Date().toLocaleTimeString()}] 🚀 Triggering ${currentStrategy.toUpperCase()} upload process...`);
+
+            if (currentStrategy === 'sync') {
+                await runSyncUpload(startTime);
+            } else {
+                await runAsyncUpload(startTime);
+            }
+        }
+
+        async function runSyncUpload(startTime) {
+            progressBar.style.width = '30%';
+            logToConsole("Packaging binary stream into multipart/form-data container...");
+
+            const formData = new FormData();
+            formData.append("file", selectedFile);
+
+            progressBar.style.width = '60%';
+            logToConsole(`Initiating POST transaction to Sync API Route: ${SYNC_URL}`);
+
+            try {
+                const response = await fetch(SYNC_URL, {
+                    method: 'POST',
+                    body: formData,
+                    headers: {
+                        "Accept": "application/json"
+                    }
+                });
+
+                progressBar.style.width = '90%';
+                const duration = ((performance.now() - startTime) / 1000).toFixed(2);
+                const data = await response.json();
+                
+                progressBar.style.width = '100%';
+
+                if (response.ok) {
+                    statusMessage.innerText = `Upload Complete! Ingested in ${duration}s.`;
+                    statusMessage.style.color = "var(--success-color)";
+                    logToConsole(`\n🟢 SUCCESS! HTTP ${response.status}\nElapsed Time: ${duration} seconds\nResponse Metadata:\n${JSON.stringify(data, null, 4)}`);
+                } else {
+                    statusMessage.innerText = `Execution Error: HTTP ${response.status}`;
+                    statusMessage.style.color = "var(--danger-color)";
+                    logToConsole(`\n🔴 FAILURE! HTTP ${response.status}\nError Details:\n${JSON.stringify(data, null, 4)}`);
+                }
+
+            } catch (error) {
+                progressBar.style.width = '100%';
+                statusMessage.innerText = "Network / CORS exception encountered.";
+                statusMessage.style.color = "var(--danger-color)";
+                logToConsole(`\n🔴 NETWORK EXCEPTION:\n${error.toString()}\n\nTip: Validate that CORS and endpoint methods are configured on your API Gateway resource.`);
+            } finally {
+                execBtn.disabled = false;
+            }
+        }
+
+        async function runAsyncUpload(startTime) {
+            progressBar.style.width = '20%';
+            logToConsole("Reading binary stream into memory...");
+
+            const reader = new FileReader();
+            reader.readAsDataURL(selectedFile);
+
+            reader.onload = async function () {
+                progressBar.style.width = '50%';
+                logToConsole("Converting payload to Base64 character string...");
+                
+                // Strip the standard base64 meta header
+                const base64Text = reader.result.split(',')[1];
+                
+                const payload = {
+                    file_name: selectedFile.name,
+                    file_content: base64Text
+                };
+
+                logToConsole(`Payload size: ${(JSON.stringify(payload).length / 1024).toFixed(1)} KB (Base64 character overhead included)`);
+                logToConsole(`Initiating POST transaction to SQS Async API Route: ${ASYNC_URL}`);
+                progressBar.style.width = '70%';
+
+                try {
+                    const response = await fetch(ASYNC_URL, {
+                        method: 'POST',
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json'
+                        },
+                        body: JSON.stringify(payload)
+                    });
+
+                    progressBar.style.width = '90%';
+                    const duration = ((performance.now() - startTime) / 1000).toFixed(2);
+                    const data = await response.json();
+                    progressBar.style.width = '100%';
+
+                    if (response.ok) {
+                        statusMessage.innerText = `Message queued! Latency: ${duration}s.`;
+                        statusMessage.style.color = "var(--success-color)";
+                        logToConsole(`\n🟢 SUCCESS! HTTP ${response.status}\nIngestion Latency (Client to Queue): ${duration} seconds\nResponse Queue Metadata:\n${JSON.stringify(data, null, 4)}`);
+                        logToConsole(`\nℹ️ SQS MessageId received. AWS SQS has absorbed the file base64 data and will trigger your downstream async decoders safely in the background, freeing your client instantly.`);
+                    } else {
+                        statusMessage.innerText = `Execution Error: HTTP ${response.status}`;
+                        statusMessage.style.color = "var(--danger-color)";
+                        logToConsole(`\n🔴 INGESTION FAILURE! HTTP ${response.status}\nError Details:\n${JSON.stringify(data, null, 4)}`);
+                    }
+
+                } catch (error) {
+                    progressBar.style.width = '100%';
+                    statusMessage.innerText = "Network / CORS exception encountered.";
+                    statusMessage.style.color = "var(--danger-color)";
+                    logToConsole(`\n🔴 NETWORK EXCEPTION:\n${error.toString()}\n\nTip: Verify CORS settings and assure your SQS API gateway resource has proper AWS Service Integrations.`);
+                } finally {
+                    execBtn.disabled = false;
+                }
+            };
+
+            reader.onerror = function (error) {
+                progressBar.style.width = '100%';
+                statusMessage.innerText = "File processing exception.";
+                statusMessage.style.color = "var(--danger-color)";
+                logToConsole(`🔴 File processing error: ${error}`);
+                execBtn.disabled = false;
+            };
+        }
+
+        function logToConsole(text) {
+            if (consoleBox.innerText === `{ "System": "Ready to initiate AWS network transfers. Select a file above." }`) {
+                consoleBox.innerText = text;
+            } else {
+                consoleBox.innerText += "\n" + text;
+            }
+            consoleBox.scrollTop = consoleBox.scrollHeight;
+        }
+
+        function clearConsole() {
+            consoleBox.innerText = "";
+            logToConsole("Console cleared. Awaiting triggers...");
+        }
+    </script>
+</body>
+</html>

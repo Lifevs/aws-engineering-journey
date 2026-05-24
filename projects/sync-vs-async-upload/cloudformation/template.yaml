@@ -1,0 +1,230 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: AWS Serverless Architecture comparison - Sync Upload vs SQS Async Ingestion Ingestion.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: dev
+    Description: Environment stage for resources.
+
+Resources:
+  # -------------------------------------------------------------
+  # S3 Bucket for File Upload Storage
+  # -------------------------------------------------------------
+  UploadBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub 'aws-engineering-journey-uploads-${AWS::AccountId}-${AWS::Region}'
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - POST
+              - PUT
+              - OPTIONS
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3000
+
+  # -------------------------------------------------------------
+  # SQS Queue to absorb high-concurrency ingestion spikes
+  # -------------------------------------------------------------
+  IngestQueue:
+    Type: 'AWS::SQS::Queue'
+    Properties:
+      QueueName: !Sub 'aws-engineering-journey-ingest-queue'
+      VisibilityTimeout: 90 # Match Lambda execution timeout (3x Lambda timeout of 30s)
+
+  # -------------------------------------------------------------
+  # API Gateway: Exposes both Sync & Async Ingest Endpoints
+  # -------------------------------------------------------------
+  UploadApi:
+    Type: 'AWS::Serverless::Api'
+    Properties:
+      StageName: !Ref EnvironmentName
+      Cors:
+        AllowMethods: "'POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      # Custom DefinitionBody to establish Direct API Gateway -> SQS Integration
+      DefinitionBody:
+        swagger: '2.0'
+        info:
+          title: !Sub 'UploadInboundApi-${EnvironmentName}'
+          version: '1.0'
+        paths:
+          /sync:
+            post:
+              summary: Synchronous File Upload Route
+              consumes:
+                - multipart/form-data
+              produces:
+                - application/json
+              responses:
+                '200':
+                  description: Success response
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SyncUploadFunction.Arn}/invocations'
+                responses:
+                  default:
+                    statusCode: '200'
+            options:
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{"statusCode": 200}'
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: ''
+
+          /async:
+            post:
+              summary: Asynchronous SQS Ingestion Route (Direct Service Integration)
+              consumes:
+                - application/json
+              produces:
+                - application/json
+              responses:
+                '200':
+                  description: Success response
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: aws
+                credentials: !GetAtt ApiGatewaySqsRole.Arn
+                httpMethod: POST
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:sqs:path/${AWS::AccountId}/${IngestQueue.QueueName}'
+                requestParameters:
+                  'integration.request.header.Content-Type': "'application/x-www-form-urlencoded'"
+                requestTemplates:
+                  # Translate incoming JSON file body into SQS SendMessage form-urlencoded format
+                  application/json: 'Action=SendMessage&MessageBody=$util.urlEncode($input.body)'
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      # Format SQS response XML to clean JSON for client uploader
+                      application/json: |
+                        #set($inputRoot = $input.path('$'))
+                        {
+                          "status": "Accepted",
+                          "message": "Payload queued in SQS successfully.",
+                          "MessageId": "$input.path('//SendMessageResult/MessageId').toString()",
+                          "RequestId": "$input.path('//ResponseMetadata/RequestId').toString()"
+                        }
+            options:
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{"statusCode": 200}'
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: ''
+
+  # -------------------------------------------------------------
+  # IAM Role allowing API Gateway to put messages into SQS
+  # -------------------------------------------------------------
+  ApiGatewaySqsRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: ApiGatewaySqsWritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:SendMessage'
+                Resource: !GetAtt IngestQueue.Arn
+
+  # -------------------------------------------------------------
+  # Sync Lambda Function (API Gateway Proxy target)
+  # -------------------------------------------------------------
+  SyncUploadFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: !Sub 'sync-upload-function-${EnvironmentName}'
+      CodeUri: ../lambda/
+      Handler: sync_lambda.lambda_handler
+      Runtime: python3.12
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          UPLOAD_BUCKET: !Ref UploadBucket
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref UploadBucket
+      Events:
+        SyncApiTrigger:
+          Type: Api
+          Properties:
+            RestApiId: !Ref UploadApi
+            Path: /sync
+            Method: post
+
+  # -------------------------------------------------------------
+  # Async Lambda Function (Triggered by SQS Ingestion Queue)
+  # -------------------------------------------------------------
+  AsyncUploadFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      FunctionName: !Sub 'async-upload-function-${EnvironmentName}'
+      CodeUri: ../lambda/
+      Handler: async_lambda.lambda_handler
+      Runtime: python3.12
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          UPLOAD_BUCKET: !Ref UploadBucket
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref UploadBucket
+      Events:
+        QueueTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt IngestQueue.Arn
+            BatchSize: 10
+
+Outputs:
+  S3BucketName:
+    Description: Ingestion Bucket Name
+    Value: !Ref UploadBucket
+  SqsQueueName:
+    Description: Buffered Queue Name
+    Value: !GetAtt IngestQueue.QueueName
+  ApiEndpointUrl:
+    Description: Base API URL for your frontend configuration
+    Value: !Sub 'https://${UploadApi}.execute-api.${AWS::Region}.amazonaws.com/${EnvironmentName}'
