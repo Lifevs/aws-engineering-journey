@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Loosely Coupled Serverless Architecture using
+  API Gateway, Lambda, and Amazon SQS.
+
+Resources:
+
+  #########################################################
+  # SQS QUEUE
+  #########################################################
+
+  LooseCouplingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: LooseCouplingQueue
+
+  #########################################################
+  # IAM ROLE FOR LAMBDA FUNCTIONS
+  #########################################################
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LooseCouplingLambdaRole
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Policies:
+        - PolicyName: LambdaBasicAndSQSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              #################################################
+              # CloudWatch Logs Permissions
+              #################################################
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              #################################################
+              # Allow Lambda-1 to Send Messages to SQS
+              #################################################
+
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt LooseCouplingQueue.Arn
+
+              #################################################
+              # Allow Lambda-2 to Consume Messages from SQS
+              #################################################
+
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt LooseCouplingQueue.Arn
+
+  #########################################################
+  # LAMBDA-1 (Producer)
+  #########################################################
+
+  Lambda1:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Lambda-1
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 15
+
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref LooseCouplingQueue
+
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          sqs = boto3.client('sqs')
+
+          def lambda_handler(event, context):
+
+              queue_url = os.environ['QUEUE_URL']
+
+              message = {
+                  "event": "Message from Lambda-1",
+                  "source": "API Gateway"
+              }
+
+              response = sqs.send_message(
+                  QueueUrl=queue_url,
+                  MessageBody=json.dumps(message)
+              )
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "message": "Message sent to SQS successfully",
+                      "message_id": response['MessageId']
+                  })
+              }
+
+  #########################################################
+  # LAMBDA-2 (Consumer)
+  #########################################################
+
+  Lambda2:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Lambda-2
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 15
+
+      Code:
+        ZipFile: |
+          import json
+
+          def lambda_handler(event, context):
+
+              for record in event['Records']:
+
+                  message_body = record['body']
+
+                  print("Received Message:")
+                  print(message_body)
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "message": "Messages processed successfully"
+                  })
+              }
+
+  #########################################################
+  # EVENT SOURCE MAPPING (SQS -> Lambda-2)
+  #########################################################
+
+  SQSEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt LooseCouplingQueue.Arn
+      FunctionName: !Ref Lambda2
+
+  #########################################################
+  # API GATEWAY
+  #########################################################
+
+  LooseCouplingAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: LooseCouplingAPI
+
+  #########################################################
+  # API RESOURCE -> /loose
+  #########################################################
+
+  LooseResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref LooseCouplingAPI
+      ParentId: !GetAtt LooseCouplingAPI.RootResourceId
+      PathPart: loose
+
+  #########################################################
+  # GET METHOD
+  #########################################################
+
+  LooseMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref LooseCouplingAPI
+      ResourceId: !Ref LooseResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub:
+            - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Lambda1Arn}/invocations
+            - Lambda1Arn: !GetAtt Lambda1.Arn
+
+  #########################################################
+  # API DEPLOYMENT
+  #########################################################
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - LooseMethod
+    Properties:
+      RestApiId: !Ref LooseCouplingAPI
+      StageName: prod
+
+  #########################################################
+  # PERMISSION FOR API GATEWAY TO INVOKE LAMBDA-1
+  #########################################################
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Lambda1
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+Outputs:
+
+  #########################################################
+  # API ENDPOINT
+  #########################################################
+
+  ApiEndpoint:
+    Description: API Gateway Endpoint URL
+    Value:
+      Fn::Sub:
+        - https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/prod/loose
+        - ApiId: !Ref LooseCouplingAPI
+
+  #########################################################
+  # SQS DETAILS
+  #########################################################
+
+  QueueURL:
+    Description: SQS Queue URL
+    Value: !Ref LooseCouplingQueue
+
+  QueueARN:
+    Description: SQS Queue ARN
+    Value: !GetAtt LooseCouplingQueue.Arn
+
+  #########################################################
+  # LAMBDA NAMES
+  #########################################################
+
+  Lambda1Name:
+    Description: Producer Lambda Function
+    Value: !Ref Lambda1
+
+  Lambda2Name:
+    Description: Consumer Lambda Function
+    Value: !Ref Lambda2

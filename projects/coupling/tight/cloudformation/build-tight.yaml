@@ -1,0 +1,207 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Tightly Coupled Serverless Architecture using API Gateway,
+  Lambda-1, Lambda-2, and synchronous Lambda invocation.
+
+Resources:
+
+  #########################################
+  # IAM ROLE FOR LAMBDA FUNCTIONS
+  #########################################
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: TightCouplingLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Policies:
+        - PolicyName: LambdaBasicAndInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+
+              # CloudWatch Logs Permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              # Allow Lambda-1 to invoke Lambda-2 synchronously
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt Lambda2.Arn
+
+  #########################################
+  # LAMBDA-2
+  #########################################
+
+  Lambda2:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Lambda-2
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10
+
+      Code:
+        ZipFile: |
+          import json
+
+          def lambda_handler(event, context):
+
+              print("Lambda-2 invoked successfully")
+
+              response = {
+                  "message": "Response from Lambda-2",
+                  "input_received": event
+              }
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps(response)
+              }
+
+  #########################################
+  # LAMBDA-1
+  #########################################
+
+  Lambda1:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Lambda-1
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 15
+
+      Environment:
+        Variables:
+          TARGET_LAMBDA_NAME: !Ref Lambda2
+
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          lambda_client = boto3.client("lambda")
+
+          def lambda_handler(event, context):
+
+              target_lambda = os.environ["TARGET_LAMBDA_NAME"]
+
+              payload = {
+                  "message": "Invocation from Lambda-1"
+              }
+
+              response = lambda_client.invoke(
+                  FunctionName=target_lambda,
+                  InvocationType='RequestResponse',
+                  Payload=json.dumps(payload)
+              )
+
+              response_payload = json.loads(
+                  response['Payload'].read()
+              )
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "message": "Lambda-1 executed successfully",
+                      "lambda2_response": response_payload
+                  })
+              }
+
+  #########################################
+  # API GATEWAY
+  #########################################
+
+  TightCouplingAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: TightCouplingAPI
+
+  #########################################
+  # API RESOURCE -> /couplingt
+  #########################################
+
+  CouplingResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref TightCouplingAPI
+      ParentId: !GetAtt TightCouplingAPI.RootResourceId
+      PathPart: couplingt
+
+  #########################################
+  # GET METHOD
+  #########################################
+
+  CouplingMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref TightCouplingAPI
+      ResourceId: !Ref CouplingResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri:
+          Fn::Sub:
+            - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Lambda1Arn}/invocations
+            - Lambda1Arn: !GetAtt Lambda1.Arn
+
+  #########################################
+  # API DEPLOYMENT
+  #########################################
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - CouplingMethod
+    Properties:
+      RestApiId: !Ref TightCouplingAPI
+      StageName: prod
+
+  #########################################
+  # PERMISSION FOR API GATEWAY
+  #########################################
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Lambda1
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+Outputs:
+
+  ApiEndpoint:
+    Description: API Gateway Invoke URL
+    Value:
+      Fn::Sub:
+        - https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/prod/couplingt
+        - ApiId: !Ref TightCouplingAPI
+
+  Lambda1Name:
+    Description: Lambda-1 Function Name
+    Value: !Ref Lambda1
+
+  Lambda2Name:
+    Description: Lambda-2 Function Name
+    Value: !Ref Lambda2
