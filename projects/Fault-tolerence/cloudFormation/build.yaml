@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Description: >
+  Fault-Tolerant Serverless Order Processing System
+  using AWS SAM, SQS, DynamoDB, Lambda, and SSM Parameter Store.
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: python3.10
+
+Resources:
+
+  #########################################################
+  # DYNAMODB TABLES
+  #########################################################
+
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: OrdersTable
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: OrderID
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: OrderID
+          KeyType: HASH
+
+  IdempotencyTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: IdempotencyTable
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: IdempotencyKey
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: IdempotencyKey
+          KeyType: HASH
+
+  #########################################################
+  # DEAD LETTER QUEUE
+  #########################################################
+
+  OrderDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: OrderDeadLetterQueue
+
+  #########################################################
+  # MAIN PROCESSING QUEUE
+  #########################################################
+
+  OrderProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: OrderProcessingQueue
+
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  #########################################################
+  # SSM PARAMETER STORE
+  #########################################################
+
+  CircuitBreakerParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /orders/circuit-breaker-status
+      Type: String
+      Value: CLOSED
+      Description: Circuit breaker status for order processing
+
+  #########################################################
+  # IAM ROLE FOR LAMBDA FUNCTION
+  #########################################################
+
+  OrderProcessorFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: OrderProcessorFunctionRole
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+      Policies:
+        - PolicyName: OrderProcessorLeastPrivilegePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+
+            Statement:
+
+              #################################################
+              # CLOUDWATCH LOGS
+              #################################################
+
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              #################################################
+              # SQS PERMISSIONS
+              #################################################
+
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt OrderProcessingQueue.Arn
+
+              #################################################
+              # DYNAMODB PERMISSIONS
+              #################################################
+
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !GetAtt OrdersTable.Arn
+                  - !GetAtt IdempotencyTable.Arn
+
+              #################################################
+              # SSM PARAMETER STORE PERMISSIONS
+              #################################################
+
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/orders/circuit-breaker-status
+
+  #########################################################
+  # ORDER PROCESSOR LAMBDA FUNCTION
+  #########################################################
+
+  OrderProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: OrderProcessorFunction
+      Handler: app.lambda_handler
+      Runtime: python3.10
+      Role: !GetAtt OrderProcessorFunctionRole.Arn
+
+      Environment:
+        Variables:
+          ORDERS_TABLE_NAME: !Ref OrdersTable
+          IDEMPOTENCY_TABLE_NAME: !Ref IdempotencyTable
+          SSM_PARAMETER_NAME: !Ref CircuitBreakerParameter
+
+      InlineCode: |
+        import json
+        import os
+        import boto3
+
+        dynamodb = boto3.resource('dynamodb')
+        ssm = boto3.client('ssm')
+
+        orders_table = dynamodb.Table(
+            os.environ['ORDERS_TABLE_NAME']
+        )
+
+        idempotency_table = dynamodb.Table(
+            os.environ['IDEMPOTENCY_TABLE_NAME']
+        )
+
+        parameter_name = os.environ['SSM_PARAMETER_NAME']
+
+        def lambda_handler(event, context):
+
+            parameter = ssm.get_parameter(
+                Name=parameter_name
+            )
+
+            circuit_status = parameter['Parameter']['Value']
+
+            print(f"Circuit Breaker Status: {circuit_status}")
+
+            for record in event['Records']:
+
+                body = json.loads(record['body'])
+
+                order_id = body.get('OrderID', 'UNKNOWN')
+                idempotency_key = body.get(
+                    'IdempotencyKey',
+                    'UNKNOWN'
+                )
+
+                orders_table.put_item(
+                    Item={
+                        'OrderID': order_id,
+                        'Status': 'PROCESSED'
+                    }
+                )
+
+                idempotency_table.put_item(
+                    Item={
+                        'IdempotencyKey': idempotency_key
+                    }
+                )
+
+                print(f"Processed Order: {order_id}")
+
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'message': 'Orders processed successfully'
+                })
+            }
+
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrderProcessingQueue.Arn
+            BatchSize: 1
+            Enabled: true
+
+Outputs:
+
+  #########################################################
+  # DYNAMODB OUTPUTS
+  #########################################################
+
+  OrdersTableName:
+    Description: Orders DynamoDB Table Name
+    Value: !Ref OrdersTable
+
+  IdempotencyTableName:
+    Description: Idempotency DynamoDB Table Name
+    Value: !Ref IdempotencyTable
+
+  #########################################################
+  # SQS OUTPUTS
+  #########################################################
+
+  OrderProcessingQueueURL:
+    Description: Main Processing Queue URL
+    Value: !Ref OrderProcessingQueue
+
+  OrderProcessingQueueARN:
+    Description: Main Processing Queue ARN
+    Value: !GetAtt OrderProcessingQueue.Arn
+
+  DeadLetterQueueURL:
+    Description: Dead Letter Queue URL
+    Value: !Ref OrderDeadLetterQueue
+
+  #########################################################
+  # SSM PARAMETER OUTPUT
+  #########################################################
+
+  CircuitBreakerParameterName:
+    Description: SSM Circuit Breaker Parameter
+    Value: !Ref CircuitBreakerParameter
+
+  #########################################################
+  # LAMBDA OUTPUT
+  #########################################################
+
+  OrderProcessorFunctionName:
+    Description: Lambda Function Name
+    Value: !Ref OrderProcessorFunction
