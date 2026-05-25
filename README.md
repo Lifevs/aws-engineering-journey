@@ -88,28 +88,17 @@ aws-engineering-journey/
 ├── projects/                          # Production-grade Case Studies
 │   ├── sync-vs-async-upload/          # Sync vs Decoupled SQS File Ingestion (Completed)
 │   │   ├── README.md                  # Deployment & setup guide
-│   │   ├── lambda/                    # AWS Lambda source code
-│   │   │   ├── sync_lambda.py         # Sync parser Lambda
-│   │   │   └── async_lambda.py        # SQS async consumer Lambda
-│   │   ├── cloudformation/            # SAM Infrastructure-as-Code templates
-│   │   │   └── template.yaml          # S3, SQS, Lambdas & API Gateway Direct integration
-│   │   ├── load-testing/              # Stress-test benchmarks
-│   │   │   ├── locustfile.py          # Combined Locust weight script
-│   │   │   └── sample_test.jpg        # Standard test image
-│   │   ├── frontend/                  # Unified Uploader Web Client
-│   │   │   └── upload.html            # Premium glassmorphism client
-│   │   └── docs/                      # Scientific documentation
-│   │       ├── scaling-notes.md       # Ingestion boundaries research
-│   │       └── cost-analysis.md       # Cost optimization comparison models
+...
+│   ├── coupling/                      # Tight vs Loose Coupling Analysis (New)
+│   │   ├── README.md                  # Architectural comparison & benchmarks
+│   │   └── architecture/              # Diagram-as-code (Python)
+│   │
+│   ├── Fault-tolerence/               # Resilient Processing with Circuit Breaker (New)
+│   │   ├── Lambda/                    # Idempotent processor with SSM integration
+│   │   └── cloudFormation/            # SQS with DLQ & DynamoDB schema
 │   │
 │   ├── stateful-vs-stateless-auth/    # Cognito Stateful vs Stateless Auth (Completed)
-│   │   ├── README.md                  # Detailed testing & architecture guide
-│   │   ├── scripts/                   # Automated script resources
-│   │   │   ├── cognito_user_injection.py  # Bypasses verification & injects users
-│   │   │   └── integration_burst_test.py  # Parallel multi-threaded scaling test
-│   │   └── docs/                      # Technical documentation
-│   │       └── architecture-notes.md  # Deep JWKS signature vs Redis cache comparison
-│   │
+...
 │   └── api-gateway-transformations/   # Edge request/response VTL mapping templates (Planned)
 │
 └── reusable/                          # Common Cloud Infrastructures
