@@ -18,7 +18,7 @@ class TightCouplingLoadTest(HttpUser):
         # We wrap the request to log custom performance metrics if needed
         start_time = time.time()
         
-        with self.client.get("/couplingt", headers=headers, catch_failures=True) as response:
+        with self.client.get("/couplingt", headers=headers, catch_response=True) as response:
             duration = time.time() - start_time
             
             if response.status_code == 200:
