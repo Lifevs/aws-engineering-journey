@@ -22,6 +22,35 @@ In this pattern, the Producer Lambda pushes a message to an SQS Queue and return
 
 ---
 
+## 📈 Performance Benchmarking Analysis
+
+We conducted a high-concurrency stress test using **Locust** to evaluate how both architectures handle heavy traffic.
+
+### Test Configuration
+- **Duration**: ~5 Minutes
+- **Tool**: Locust (Distributed Load Testing)
+- **Environment**: AWS Lambda (Python 3.12) + API Gateway
+
+### Comparative Results
+
+| Metric | Tight Coupling (Sync) | Loose Coupling (Async) |
+| :--- | :--- | :--- |
+| **Total Requests** | 8,825 | **29,571** |
+| **Avg Response Time** | 131.71 ms | **1,416.32 ms*** |
+| **P95 Response Time** | 140 ms | **7,900 ms*** |
+| **Max Response Time** | 9,738 ms | 82,537 ms |
+| **Failure Rate** | **82.3%** (7,265 failures) | **49.3%** (14,604 failures) |
+| **Max RPS** | 61.6 | **98.6** |
+
+*\*Note: In the loose coupling test, the significantly higher latency and failure rates observed were due to API Gateway reaching its integration timeout/throttling limits during the burst, whereas the tight coupling failed much faster due to direct dependency exhaustion.*
+
+### Key Insights
+1. **Reliability**: Tight coupling resulted in an **82.3% failure rate** under load. When the downstream Lambda throttled, the entire chain collapsed immediately.
+2. **Throughput**: Loose coupling achieved **~60% higher throughput** (98.6 RPS vs 61.6 RPS) before hitting limits.
+3. **Resilience**: In the Loose Coupling model, even when the API returned errors, messages that successfully reached SQS were processed in the background, ensuring **zero data loss** for accepted requests. Tight coupling offers no such guarantee.
+
+---
+
 ## 🛠️ Infrastructure Breakdown
 
 ### Tight Coupling (`/projects/coupling/tight`)
@@ -34,17 +63,6 @@ In this pattern, the Producer Lambda pushes a message to an SQS Queue and return
 - **Lambda-1 (Producer)**: Uses `boto3.client('sqs').send_message()`.
 - **SQS Queue**: Acts as the message buffer.
 - **Lambda-2 (Consumer)**: Triggered by SQS to process messages in batches.
-
----
-
-## 📈 Benchmarking Results
-
-Stress tests were conducted using **Locust** to measure performance under load.
-
-- **Tight Coupling**: Showed higher failure rates and increased latency as concurrent requests scaled up, due to synchronous waiting.
-- **Loose Coupling**: Maintained stable response times for the client, as work was offloaded to the background queue.
-
-> You can find the full benchmarking reports in the `benchMarking/` folders within each project directory.
 
 ---
 
