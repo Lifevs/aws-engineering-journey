@@ -6,34 +6,7 @@ It provides deployable Infrastructure-as-Code (SAM), serverless Lambda functions
 
 ---
 
-## 📂 Project Architecture & Contents
-
-```
-sync-vs-async-upload/
-├── README.md                      # Case Study Blueprint
-│
-├── lambda/                        # Serverless Execution Logic
-│   ├── sync_lambda.py             # Parses multipart payloads synchronously to S3
-│   └── async_lambda.py            # Triggered by SQS to decode base64 streams to S3
-│
-├── cloudformation/
-│   └── template.yaml              # Deployable AWS SAM Template
-│
-├── load-testing/
-│   ├── locustfile.py              # Comparative Locust load testing script
-│   └── sample_test.jpg            # Standardized load testing image asset
-│
-├── frontend/
-│   └── upload.html                # Premium unified HTML Dashboard (with glassmorphism UI)
-│
-└── docs/
-    ├── scaling-notes.md           # AWS Payload caps, timeouts, and bottleneck notes
-    └── cost-analysis.md           # Mathematical cost curves at 100k, 1M, and 10M scales
-```
-
----
-
-## ⚙️ Architecture Pathways
+## 🏗️ Architecture Pathways
 
 ### 1. Synchronous Route (Direct blocking)
 * **Path**: `Client ──> API Gateway (POST /sync) ──> Lambda (Sync) ──> Amazon S3`
@@ -44,6 +17,21 @@ sync-vs-async-upload/
 * **Path**: `Client ──> API Gateway (POST /async) ──[Direct SQS Integration]──> Amazon SQS ──> Lambda (Async) ──> Amazon S3`
 * **Mechanism**: API Gateway directly streams the client base64 request into Amazon SQS under **30ms**. The client terminates connection instantly. SQS triggers `async_lambda.py` in downstream batches of 10 to write to S3 asynchronously.
 * **Limitations**: Bound by SQS **256KB** payload capacity.
+
+---
+
+## 🖼️ System Dashboard & Benchmarks
+
+The project includes a premium Glassmorphism-styled dashboard and extensive load testing results.
+
+| Uploader Dashboard | Load Test Results | CloudWatch Logs |
+| :---: | :---: | :---: |
+| ![Dashboard](./screenshots/Screenshot%202026-05-23%20at%205.25.29%20PM.png) | ![Locust](./screenshots/Screenshot%202026-05-23%20at%209.23.18%20PM.png) | ![Logs](./screenshots/Screenshot%202026-05-23%20at%207.22.32%20PM.png) |
+
+---
+
+## 📂 Project Architecture & Contents
+... (rest of the content)
 
 ---
 

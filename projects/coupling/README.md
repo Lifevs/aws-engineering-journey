@@ -22,6 +22,16 @@ In this pattern, the Producer Lambda pushes a message to an SQS Queue and return
 
 ---
 
+## 📊 Performance Visuals
+
+Captured during high-concurrency stress tests:
+
+| Metric Comparison | Error Rates (Tight) | Error Rates (Loose) |
+| :---: | :---: | :---: |
+| ![Stats](./tightVsloose/Screenshot%202026-05-24%20at%206.26.36%20PM.png) | ![Errors Tight](./tightVsloose/Screenshot%202026-05-24%20at%206.26.56%20PM.png) | ![Errors Loose](./tightVsloose/Screenshot%202026-05-24%20at%206.27.40%20PM.png) |
+
+---
+
 ## 📈 Performance Benchmarking Analysis
 
 We conducted a high-concurrency stress test using **Locust** to evaluate how both architectures handle heavy traffic.

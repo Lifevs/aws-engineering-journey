@@ -4,23 +4,24 @@
 
 ---
 
-# 🚀 About This Repository
+# 🚀 Featured Projects
 
-This repository is my long-term cloud engineering lab focused on:
+Detailed implementation of core cloud engineering patterns.
 
-- AWS Certifications
-- Real-world architecture implementation
-- Distributed systems
-- Serverless engineering
-- Event-driven systems
-- Performance engineering
-- DevOps & CloudOps
-- AI/ML & Generative AI
-- Reliability engineering
-- Scalability benchmarking
-- Production-grade system design
+### 🛒 [Multi-Store CRUD Catalog](./projects/multi-store-crud-catalog)
+**Polyglot Persistence in Action.** A central Lambda router managing data across S3 (images), DynamoDB (NoSQL metadata), and Aurora RDS (relational search). Includes diagrams-as-code and a frontend test harness.
 
-Instead of only studying theory, every AWS skill is mapped to hands-on projects, experiments, architecture breakdowns, and benchmarking exercises.
+### 🔗 [Tight vs. Loose Coupling](./projects/coupling)
+**Performance Comparison.** Benchmarking synchronous direct Lambda calls vs. asynchronous SQS-buffered patterns using Locust. Proves resilience and throughput gains in event-driven designs.
+
+### 🛡️ [Fault Tolerance & Resilience](./projects/fault-tolerance)
+**Reliability Engineering.** Implements Circuit Breakers using SSM Parameter Store and Idempotency patterns with DynamoDB to ensure robust message processing from SQS.
+
+### 🔐 [Stateful vs. Stateless Auth](./projects/stateful-vs-stateless-auth)
+**Security at Scale.** Benchmarking Amazon Cognito's stateless JWT authorization against traditional session models. Includes multi-threaded burst testing scripts.
+
+### 📤 [Sync vs. Async File Ingestion](./projects/sync-vs-async-upload)
+**Optimization Case Study.** Comparing direct API Gateway uploads to SQS-buffered asynchronous processing. Features a premium glassmorphic dashboard and deep cost-analysis research.
 
 ---
 
@@ -30,78 +31,32 @@ Instead of only studying theory, every AWS skill is mapped to hands-on projects,
 - 🚧 AWS Developer Associate (DVA-C02)
 - 🚧 AWS Solutions Architect Associate (SAA-C03)
 - 🚧 AWS SysOps Administrator Associate (SOA-C03)
-- 🔜 AWS Machine Learning Associate
-- 🔜 AWS Generative AI Engineer Professional
 - 🎯 AWS Golden Jacket Journey
 - 🎯 Build production-grade cloud engineering portfolio
-- 🎯 Remote Cloud/DevOps/Platform Engineering opportunities
 
 ---
 
 # 🧠 Core Engineering Areas
 
-## ☁️ Cloud & Serverless
-- AWS Lambda
-- API Gateway
-- Step Functions
-- EventBridge
-- SQS/SNS
-- DynamoDB
-- S3
-
-## 🏗️ Architecture & System Design
-- Event-driven systems
-- Microservices
-- High availability
-- Fault tolerance
-- Disaster recovery
-- Scalability patterns
-- Multi-region architectures
-
-## ⚙️ DevOps & CloudOps
-- CI/CD
-- Infrastructure as Code
-- Monitoring
-- Observability
-- Auto-remediation
-- Load testing
-- Cost optimization
-
-## 🤖 AI / ML / Generative AI
-- Bedrock
-- SageMaker
-- RAG pipelines
-- AI agents
-- Vector databases
-- AI event-driven workflows
+| Area | Technologies |
+| :--- | :--- |
+| **Cloud & Serverless** | Lambda, API Gateway, Step Functions, EventBridge, SQS/SNS, DynamoDB, S3 |
+| **Architecture** | Event-driven systems, Microservices, Fault tolerance, Scalability patterns |
+| **DevOps & CloudOps** | CI/CD, IaC (CloudFormation/SAM), Monitoring, Load testing (Locust) |
+| **AI / ML / GenAI** | Bedrock, SageMaker, RAG pipelines, AI agents |
 
 ---
 
 # 📂 Repository Structure
 
-Below is the directory structure representing the active, implemented, and planned projects within this cloud engineering lab:
-
 ```bash
 aws-engineering-journey/
-├── README.md                          # Repository Index & Learning Goals
-│
-├── projects/                          # Production-grade Case Studies
-│   ├── sync-vs-async-upload/          # Sync vs Decoupled SQS File Ingestion (Completed)
-│   │   ├── README.md                  # Deployment & setup guide
-...
-│   ├── coupling/                      # Tight vs Loose Coupling Analysis (New)
-│   │   ├── README.md                  # Architectural comparison & benchmarks
-│   │   └── architecture/              # Diagram-as-code (Python)
-│   │
-│   ├── Fault-tolerence/               # Resilient Processing with Circuit Breaker (New)
-│   │   ├── Lambda/                    # Idempotent processor with SSM integration
-│   │   └── cloudFormation/            # SQS with DLQ & DynamoDB schema
-│   │
-│   ├── stateful-vs-stateless-auth/    # Cognito Stateful vs Stateless Auth (Completed)
-...
-│   └── api-gateway-transformations/   # Edge request/response VTL mapping templates (Planned)
-│
-└── reusable/                          # Common Cloud Infrastructures
-    ├── cloudformation/                # Standard VPC, IAM & KMS Skeletons (Planned)
-    └── scripts/                       # Deployment pipelines and helper scripts (Planned)
+├── projects/
+│   ├── multi-store-crud-catalog/    # Polyglot Persistence Store
+│   ├── coupling/                    # Tight vs Loose Comparison
+│   ├── fault-tolerance/             # Circuit Breaker & Idempotency
+│   ├── stateful-vs-stateless-auth/  # Cognito JWT vs Session Auth
+│   ├── sync-vs-async-upload/        # SQS Buffered File Ingestion
+│   └── api-gateway-transformations/ # VTL Mapping Templates (Planned)
+└── reusable/                        # Common IAM & VPC skeletons
 ```
