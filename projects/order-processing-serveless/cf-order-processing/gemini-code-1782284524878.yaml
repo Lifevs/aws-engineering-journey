@@ -1,0 +1,312 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Production Grade: Serverless Event-Driven Order Processing Pipeline'
+
+# ==========================================
+# PARAMETERS (Best Practice for Reusability)
+# ==========================================
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, prod]
+    Description: "The deployment environment (dev, test, prod)"
+
+Resources:
+  # ==========================================
+  # 1. DATABASE LAYER (Single-Table Design)
+  # ==========================================
+  UnifiedOrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties: 
+      TableName: !Sub "UnifiedOrdersTable-${Environment}"
+      AttributeDefinitions: 
+        - AttributeName: OrderId
+          AttributeType: S
+      KeySchema: 
+        - AttributeName: OrderId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST 
+
+  # ==========================================
+  # 2. MESSAGING LAYER (SNS & SQS)
+  # ==========================================
+  OrderFanoutTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "OrderFanoutTopic-${Environment}"
+
+  # --- Car Pipeline ---
+  CarOrdersDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "CarOrders-DLQ-${Environment}"
+
+  CarOrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "CarOrdersQueue-${Environment}"
+      VisibilityTimeout: 30 
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CarOrdersDLQ.Arn
+        maxReceiveCount: 3
+
+  # --- Bike Pipeline ---
+  BikeOrdersDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "BikeOrders-DLQ-${Environment}"
+
+  BikeOrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "BikeOrdersQueue-${Environment}"
+      VisibilityTimeout: 30
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt BikeOrdersDLQ.Arn
+        maxReceiveCount: 3
+
+  # ==========================================
+  # 3. WIRING & SUBSCRIPTION ROUTING
+  # ==========================================
+  CarOrdersSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt CarOrdersQueue.Arn
+      Protocol: sqs
+      TopicArn: !Ref OrderFanoutTopic
+      FilterPolicy:
+        order_category:
+          - "CAR"
+
+  BikeOrdersSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !GetAtt BikeOrdersQueue.Arn
+      Protocol: sqs
+      TopicArn: !Ref OrderFanoutTopic
+      FilterPolicy:
+        order_category:
+          - "BIKE"
+
+  AllowSNSTowriteToQueuesPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: 
+        - !Ref CarOrdersQueue
+        - !Ref BikeOrdersQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: "*"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref OrderFanoutTopic
+
+  # ==========================================
+  # 4. COMPUTE & IAM (Least Privilege)
+  # ==========================================
+  
+  # --- Ingestion Identity Role ---
+  IngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SNSPublishStrictAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref OrderFanoutTopic # Strictly limited to this topic
+
+  IngestionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "OrderIngestionAPI-${Environment}"
+      Handler: index.handler
+      Role: !GetAtt IngestionLambdaRole.Arn
+      Runtime: python3.11
+      Timeout: 10
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref OrderFanoutTopic
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          sns = boto3.client('sns')
+          def handler(event, context):
+              body = json.loads(event.get('body', '{}'))
+              category = body.get('category', 'UNKNOWN').upper()
+              
+              sns.publish(
+                  TopicArn=os.environ['TOPIC_ARN'], 
+                  Message=json.dumps(body),
+                  MessageAttributes={
+                      'order_category': {
+                          'DataType': 'String',
+                          'StringValue': category
+                      }
+                  }
+              )
+              return {
+                  "statusCode": 202, 
+                  "body": json.dumps({"status": "Accepted", "routed_as": category})
+              }
+
+  # --- Worker Identity Role ---
+  WorkerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole
+      Policies:
+        - PolicyName: DynamoDBWriteStrictAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt UnifiedOrdersTable.Arn # Strictly limited to this table
+
+  # --- Worker Compute Nodes ---
+  CarOrderWorkerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "CarOrderWorker-${Environment}"
+      Handler: index.handler
+      Role: !GetAtt WorkerLambdaRole.Arn
+      Runtime: python3.11
+      Timeout: 5
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref UnifiedOrdersTable
+          ORDER_TYPE: "CAR"
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          dynamodb = boto3.resource('dynamodb')
+          def handler(event, context):
+              table = dynamodb.Table(os.environ['TABLE_NAME'])
+              for record in event['Records']:
+                  payload = json.loads(record['body'])
+                  message = json.loads(payload['Message'])
+                  
+                  # STEP 3 TRIGGER: Intentional poison pill
+                  if message.get('vehicle') == 'FAIL_CAR':
+                      raise Exception("Intentional Car Processing Failure for DLQ Testing")
+                      
+                  table.put_item(Item={
+                      'OrderId': message.get('order_id', 'unknown'),
+                      'OrderType': os.environ['ORDER_TYPE'],
+                      'Details': message
+                  })
+
+  CarOrderEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt CarOrdersQueue.Arn
+      FunctionName: !Ref CarOrderWorkerLambda
+      BatchSize: 10
+
+  BikeOrderWorkerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "BikeOrderWorker-${Environment}"
+      Handler: index.handler
+      Role: !GetAtt WorkerLambdaRole.Arn
+      Runtime: python3.11
+      Timeout: 5
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref UnifiedOrdersTable
+          ORDER_TYPE: "BIKE"
+      Code:
+        ZipFile: |
+          import json, os, boto3
+          dynamodb = boto3.resource('dynamodb')
+          def handler(event, context):
+              table = dynamodb.Table(os.environ['TABLE_NAME'])
+              for record in event['Records']:
+                  payload = json.loads(record['body'])
+                  message = json.loads(payload['Message'])
+                  table.put_item(Item={
+                      'OrderId': message.get('order_id', 'unknown'),
+                      'OrderType': os.environ['ORDER_TYPE'],
+                      'Details': message
+                  })
+
+  BikeOrderEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt BikeOrdersQueue.Arn
+      FunctionName: !Ref BikeOrderWorkerLambda
+      BatchSize: 10
+
+  # ==========================================
+  # 5. INGRESS LAYER (API Gateway Proxy)
+  # ==========================================
+  OrderApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "ServerlessOrderIngress-${Environment}"
+
+  OrderApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt OrderApiGateway.RootResourceId
+      PathPart: orders
+      RestApiId: !Ref OrderApiGateway
+
+  OrderApiPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref OrderApiResource
+      RestApiId: !Ref OrderApiGateway
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub 
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt IngestionLambda.Arn
+
+  OrderApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: OrderApiPostMethod
+    Properties:
+      RestApiId: !Ref OrderApiGateway
+
+  OrderApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref OrderApiGateway
+      DeploymentId: !Ref OrderApiDeployment
+      StageName: !Ref Environment
+
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IngestionLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${OrderApiGateway}/*/*/orders"
+
+Outputs:
+  ApiEndpoint:
+    Description: "The public URL to submit your orders"
+    Value: !Sub "https://${OrderApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/orders"
