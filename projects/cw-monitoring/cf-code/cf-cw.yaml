@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Layer 2: Lambda Function with EMF Instrumentation'
+
+Resources:
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  InstrumentedLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: 'AppMetricsGenerator'
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import json
+          import time
+          import random
+
+          def lambda_handler(event, context):
+              start_time = time.time()
+              
+              # Simulate business logic
+              is_error = random.choice([0, 1]) # Randomly generate errors
+              is_throttled = random.choice([0, 0, 0, 1]) # Randomly generate throttles
+              
+              time.sleep(random.uniform(0.1, 0.5)) # Simulate processing latency
+              latency_ms = int((time.time() - start_time) * 1000)
+
+              # Construct the exact EMF JSON Payload
+              emf_payload = {
+                  "_aws": {
+                      "Timestamp": int(time.time() * 1000),
+                      "CloudWatchMetrics": [
+                          {
+                              "Namespace": "ServerlessApp",
+                              "Dimensions": [["FunctionName"]],
+                              "Metrics": [
+                                  {"Name": "AppLatency", "Unit": "Milliseconds"},
+                                  {"Name": "AppErrors", "Unit": "Count"},
+                                  {"Name": "AppThrottles", "Unit": "Count"}
+                              ]
+                          }
+                      ]
+                  },
+                  "FunctionName": context.function_name,
+                  "AppLatency": latency_ms,
+                  "AppErrors": is_error,
+                  "AppThrottles": is_throttled,
+                  "Message": "Transaction processed.",
+                  "RequestId": context.aws_request_id # Property, NOT a dimension (Cost saving!)
+              }
+              
+              # Writing to standard out is all it takes!
+              print(json.dumps(emf_payload))
+              
+              if is_error:
+                  raise Exception("Simulated business error")
+                  
+              return {"statusCode": 200, "body": "Success"}
