@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Complete End-to-End Architecture - Cognito Auth, IAM Roles (Admin, Dev, Ops), API Gateway (IAM Auth), and Lambda Backend.
+
+Resources:
+  # ---------------------------------------------------------
+  # 1. COGNITO USER POOL & CLIENT
+  # ---------------------------------------------------------
+  AppUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: FineGrainedAuthPool
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+      AutoVerifiedAttributes:
+        - email
+
+  AppUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: WebClient
+      UserPoolId: !Ref AppUserPool
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+  # ---------------------------------------------------------
+  # 2. COGNITO IDENTITY POOL
+  # ---------------------------------------------------------
+  AppIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: FineGrainedIdentityPool
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref AppUserPoolClient
+          ProviderName: !GetAtt AppUserPool.ProviderName
+
+  # ---------------------------------------------------------
+  # 3. IAM ROLES FOR GROUPS
+  # ---------------------------------------------------------
+  AdminIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ApiAdminRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref AppIdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
+      Policies:
+        - PolicyName: AdminApiInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: execute-api:Invoke
+                # Admin has full access to all API GW paths/methods
+                Resource: "arn:aws:execute-api:*:*:*/*/*/*" 
+
+  DevIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ApiDevRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref AppIdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
+      Policies:
+        - PolicyName: DevApiInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: execute-api:Invoke
+                # Dev is restricted to specific paths (e.g., /dev/*)
+                Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/GET/dev/*"
+
+  OpsIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ApiOpsRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                "cognito-identity.amazonaws.com:aud": !Ref AppIdentityPool
+              "ForAnyValue:StringLike":
+                "cognito-identity.amazonaws.com:amr": authenticated
+      Policies:
+        - PolicyName: OpsApiInvokeAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: execute-api:Invoke
+                # Ops is restricted to specific paths (e.g., /ops/*)
+                Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/GET/ops/*"
+
+  # ---------------------------------------------------------
+  # 4. USER POOL GROUPS (Attaching Roles)
+  # ---------------------------------------------------------
+  AdminUserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Admin
+      Precedence: 1
+      RoleArn: !GetAtt AdminIAMRole.Arn
+      UserPoolId: !Ref AppUserPool
+
+  DevUserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Dev
+      Precedence: 2
+      RoleArn: !GetAtt DevIAMRole.Arn
+      UserPoolId: !Ref AppUserPool
+
+  OpsUserGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Ops
+      Precedence: 3
+      RoleArn: !GetAtt OpsIAMRole.Arn
+      UserPoolId: !Ref AppUserPool
+
+  # ---------------------------------------------------------
+  # 5. IDENTITY POOL ROLE ATTACHMENT
+  # ---------------------------------------------------------
+  IdentityPoolRoleMapping:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref AppIdentityPool
+      Roles:
+        authenticated: !GetAtt DevIAMRole.Arn 
+      RoleMappings:
+        UserPoolMapping:
+          Type: Token
+          AmbiguousRoleResolution: Deny
+          IdentityProvider: !Sub "cognito-idp.${AWS::Region}.amazonaws.com/${AppUserPool}:${AppUserPoolClient}"
+
+  # ---------------------------------------------------------
+  # 6. LAMBDA BACKEND
+  # ---------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ApiBackendLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  BackendLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: FineGrainedAuthBackend
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: nodejs20.x
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              const path = event.path;
+              // Extract the IAM user/role that invoked the API from the request context
+              const callerArn = event.requestContext.identity.userArn || 'Unknown Caller';
+              
+              return {
+                  statusCode: 200,
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                      message: `Success! You accessed the backend.`,
+                      accessedPath: path,
+                      authorizedByRole: callerArn
+                  })
+              };
+          };
+
+  # ---------------------------------------------------------
+  # 7. API GATEWAY (REST API with IAM Auth)
+  # ---------------------------------------------------------
+  ApiGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: FineGrainedAuthAPI
+
+  # --- Route: /dev/data ---
+  DevResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: dev
+      
+  DevDataResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !Ref DevResource
+      PathPart: data
+
+  DevDataGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref DevDataResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendLambda.Arn}/invocations"
+
+  # --- Route: /admin/settings ---
+  AdminResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: admin
+
+  AdminSettingsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !Ref AdminResource
+      PathPart: settings
+
+  AdminSettingsGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref AdminSettingsResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendLambda.Arn}/invocations"
+
+  # --- Route: /ops/status ---
+  OpsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: ops
+
+  OpsStatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !Ref OpsResource
+      PathPart: status
+
+  OpsStatusGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref OpsStatusResource
+      HttpMethod: GET
+      AuthorizationType: AWS_IAM
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendLambda.Arn}/invocations"
+
+  # --- API Deployment & Stage ---
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - DevDataGetMethod
+      - AdminSettingsGetMethod
+      - OpsStatusGetMethod
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+
+  ApiGatewayStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      DeploymentId: !Ref ApiGatewayDeployment
+      StageName: prod
+
+  # ---------------------------------------------------------
+  # 8. LAMBDA TRIGGER PERMISSIONS
+  # ---------------------------------------------------------
+  LambdaApiGatewayInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BackendLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/*/*"
+
+Outputs:
+  UserPoolId:
+    Value: !Ref AppUserPool
+  AppClientId:
+    Value: !Ref AppUserPoolClient
+  IdentityPoolId:
+    Value: !Ref AppIdentityPool
+  ApiGatewayBaseUrl:
+    Value: !Sub "https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+    Description: Base URL for your API. Append /dev/data, /admin/settings, or /ops/status to test.
