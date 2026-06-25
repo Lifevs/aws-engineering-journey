@@ -1,72 +1,78 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Layer 2: Lambda Function with EMF Instrumentation'
+Description: 'Layer 3: CloudWatch Dashboard, Alarms, and SNS Subscription'
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: 'Email address to receive SNS alerts'
+    Default: 'lokeshsaver88@gmail.com'
 
 Resources:
-  LambdaExecutionRole:
-    Type: 'AWS::IAM::Role'
+  # 1. The SNS Email Subscription (Binding to Layer 1)
+  EmailSubscription:
+    Type: 'AWS::SNS::Subscription'
     Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service: lambda.amazonaws.com
-            Action: 'sts:AssumeRole'
-      ManagedPolicyArns:
-        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      TopicArn: !ImportValue AlertTopicArn # Assuming exported from Layer 1
+      Protocol: email
+      Endpoint: !Ref AlertEmail
 
-  InstrumentedLambdaFunction:
-    Type: 'AWS::Lambda::Function'
+  # 2. The CloudWatch Alarm for Errors (Sourced from Layer 2 EMF)
+  ErrorRateAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
     Properties:
-      FunctionName: 'AppMetricsGenerator'
-      Handler: index.lambda_handler
-      Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: python3.12
-      Timeout: 10
-      Code:
-        ZipFile: |
-          import json
-          import time
-          import random
+      AlarmName: 'App-High-Error-Rate'
+      AlarmDescription: 'Triggers when Lambda EMF reports > 5 errors in 1 minute'
+      Namespace: 'ServerlessApp' # Matches the "Namespace" in our Python EMF code
+      MetricName: 'AppErrors'    # Matches the "Name" in our Python EMF code
+      Dimensions:
+        - Name: 'FunctionName'
+          Value: 'AppMetricsGenerator'
+      Statistic: 'Sum'
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: 'GreaterThanThreshold'
+      TreatMissingData: 'notBreaching'
+      AlarmActions:
+        - !ImportValue AlertTopicArn # Triggers the SNS Topic!
 
-          def lambda_handler(event, context):
-              start_time = time.time()
-              
-              # Simulate business logic
-              is_error = random.choice([0, 1]) # Randomly generate errors
-              is_throttled = random.choice([0, 0, 0, 1]) # Randomly generate throttles
-              
-              time.sleep(random.uniform(0.1, 0.5)) # Simulate processing latency
-              latency_ms = int((time.time() - start_time) * 1000)
-
-              # Construct the exact EMF JSON Payload
-              emf_payload = {
-                  "_aws": {
-                      "Timestamp": int(time.time() * 1000),
-                      "CloudWatchMetrics": [
-                          {
-                              "Namespace": "ServerlessApp",
-                              "Dimensions": [["FunctionName"]],
-                              "Metrics": [
-                                  {"Name": "AppLatency", "Unit": "Milliseconds"},
-                                  {"Name": "AppErrors", "Unit": "Count"},
-                                  {"Name": "AppThrottles", "Unit": "Count"}
-                              ]
-                          }
-                      ]
-                  },
-                  "FunctionName": context.function_name,
-                  "AppLatency": latency_ms,
-                  "AppErrors": is_error,
-                  "AppThrottles": is_throttled,
-                  "Message": "Transaction processed.",
-                  "RequestId": context.aws_request_id # Property, NOT a dimension (Cost saving!)
+  # 3. The CloudWatch Dashboard with Metrics and Logs Insights
+  ObservabilityDashboard:
+    Type: 'AWS::CloudWatch::Dashboard'
+    Properties:
+      DashboardName: 'Lambda-Observability-Dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 8, "height": 6,
+              "properties": {
+                "metrics": [ [ "ServerlessApp", "AppErrors", "FunctionName", "AppMetricsGenerator", { "stat": "Sum", "color": "#d13212" } ] ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Error Count (EMF)"
               }
-              
-              # Writing to standard out is all it takes!
-              print(json.dumps(emf_payload))
-              
-              if is_error:
-                  raise Exception("Simulated business error")
-                  
-              return {"statusCode": 200, "body": "Success"}
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 0, "width": 8, "height": 6,
+              "properties": {
+                "metrics": [ [ "ServerlessApp", "AppLatency", "FunctionName", "AppMetricsGenerator", { "stat": "Average", "color": "#1f77b4" } ] ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "title": "Latency (EMF)"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0, "y": 6, "width": 24, "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/lambda/AppMetricsGenerator' | fields @timestamp, AppLatency, AppErrors, RequestId | filter AppErrors = 1 | sort @timestamp desc | limit 20",
+                "region": "${AWS::Region}",
+                "title": "Logs Insights: Failed Transactions Tracker"
+              }
+            }
+          ]
+        }
