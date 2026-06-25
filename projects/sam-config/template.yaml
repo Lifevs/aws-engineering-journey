@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Multi-Environment AppConfig SAM Deployment
+
+# 1. Define the input parameter we configured in samconfig.toml
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: The deployment environment name
+
+Resources:
+  # 2. Define the API Gateway with a dynamic Stage Name
+  MyAppApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Environment
+
+  # 3. Define the Lambda Function
+  MyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Runtime: python3.11 # (or 3.12, pick your preferred version)
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          # Pass the parameter into the Lambda runtime as an OS variable
+          APP_ENV: !Ref Environment
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MyAppApi
+            Path: /status
+            Method: get
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${MyAppApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/status"

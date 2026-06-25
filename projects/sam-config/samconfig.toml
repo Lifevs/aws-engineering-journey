@@ -1,0 +1,31 @@
+version = 0.1
+
+# -----------------
+# DEV Environment
+# -----------------
+[dev.deploy.parameters]
+stack_name = "myapp-stack-dev"
+resolve_s3 = true
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=dev"
+
+# -----------------
+# STAGING Environment
+# -----------------
+[staging.deploy.parameters]
+stack_name = "myapp-stack-staging"
+resolve_s3 = true
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=staging"
+
+# -----------------
+# PROD Environment
+# -----------------
+[prod.deploy.parameters]
+stack_name = "myapp-stack-prod"
+resolve_s3 = true
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "Environment=prod"

@@ -1,0 +1,46 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Multi-Environment AppConfig SAM Deployment
+
+  '
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+    - dev
+    - staging
+    - prod
+    Description: The deployment environment name
+Resources:
+  MyAppApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName:
+        Ref: Environment
+  MyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: MyFunction
+      Handler: app.lambda_handler
+      Runtime: python3.11
+      Architectures:
+      - arm64
+      Environment:
+        Variables:
+          APP_ENV:
+            Ref: Environment
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: MyAppApi
+            Path: /status
+            Method: get
+    Metadata:
+      SamResourceId: MyFunction
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value:
+      Fn::Sub: https://${MyAppApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}/status
