@@ -17,6 +17,46 @@ Resources:
     Properties:
       StageName:
         Ref: Environment
+  MyAppConfig:
+    Type: AWS::AppConfig::Application
+    Properties:
+      Name:
+        Fn::Sub: FeatureFlagApp-${Environment}
+  MyAppConfigEnv:
+    Type: AWS::AppConfig::Environment
+    Properties:
+      ApplicationId:
+        Ref: MyAppConfig
+      Name:
+        Ref: Environment
+  MyAppConfigProfile:
+    Type: AWS::AppConfig::ConfigurationProfile
+    Properties:
+      ApplicationId:
+        Ref: MyAppConfig
+      Name: FeatureToggles
+      LocationUri: hosted
+  MyAppConfigVersion:
+    Type: AWS::AppConfig::HostedConfigurationVersion
+    Properties:
+      ApplicationId:
+        Ref: MyAppConfig
+      ConfigurationProfileId:
+        Ref: MyAppConfigProfile
+      Content: '{"new_payment_ui": true}'
+      ContentType: application/json
+  MyAppConfigDeployment:
+    Type: AWS::AppConfig::Deployment
+    Properties:
+      ApplicationId:
+        Ref: MyAppConfig
+      EnvironmentId:
+        Ref: MyAppConfigEnv
+      ConfigurationProfileId:
+        Ref: MyAppConfigProfile
+      ConfigurationVersion:
+        Ref: MyAppConfigVersion
+      DeploymentStrategyId: AppConfig.AllAtOnce
   MyFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -29,6 +69,18 @@ Resources:
         Variables:
           APP_ENV:
             Ref: Environment
+          APPCONFIG_APP_ID:
+            Ref: MyAppConfig
+          APPCONFIG_ENV_ID:
+            Ref: MyAppConfigEnv
+          APPCONFIG_PROFILE_ID: broken-profile-id
+      Policies:
+      - Statement:
+        - Effect: Allow
+          Action:
+          - appconfig:StartConfigurationSession
+          - appconfig:GetLatestConfiguration
+          Resource: '*'
       Events:
         ApiEvent:
           Type: Api
