@@ -1,0 +1,215 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Full Stack Serverless Observability: Lambda to EMF, CloudWatch Alarms, and SNS Alerts'
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: 'The email address that will receive operational alerts'
+    Default: 'architect@example.com'
+
+Resources:
+  # =========================================================================
+  # LAYER 1: ALERTS & NOTIFICATION INFRASTRUCTURE
+  # =========================================================================
+  AlarmNotificationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-alerts-topic'
+
+  SNSTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      Topics:
+        - !Ref AlarmNotificationTopic
+      PolicyDocument:
+        Id: 'CloudWatchAlarmPolicy'
+        Version: "2012-10-17"
+        Statement:
+          - Sid: 'AllowCloudWatchAlarmsToPublish'
+            Effect: 'Allow'
+            Principal:
+              Service: "cloudwatch.amazonaws.com" # FIXED: Correct AWS Service Principal
+            Action: "sns:Publish"
+            Resource: !Ref AlarmNotificationTopic
+
+  EmailSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref AlarmNotificationTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # =========================================================================
+  # LAYER 2: COMPUTE & EMF INSTRUMENTATION
+  # =========================================================================
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+
+  AppMetricsLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-MetricsGenerator'
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 10
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import time
+          import random
+
+          def lambda_handler(event, context):
+              start_time = time.time()
+              
+              # Simulate production states
+              is_error = random.choice([0, 0, 0, 1])
+              is_throttled = random.choice([0, 0, 0, 0, 1])
+              
+              # Simulate dynamic latency
+              time.sleep(random.uniform(0.1, 0.6))
+              latency_ms = int((time.time() - start_time) * 1000)
+
+              # Construct production-grade EMF log payload
+              emf_payload = {
+                  "_aws": {
+                      "Timestamp": int(time.time() * 1000),
+                      "CloudWatchMetrics": [
+                          {
+                              "Namespace": "ServerlessApp",
+                              "Dimensions": [["FunctionName"]],
+                              "Metrics": [
+                                  {"Name": "AppLatency", "Unit": "Milliseconds"},
+                                  {"Name": "AppErrors", "Unit": "Count"},
+                                  {"Name": "AppThrottles", "Unit": "Count"}
+                              ]
+                          }
+                      ]
+                  },
+                  "FunctionName": context.function_name,
+                  "AppLatency": latency_ms,
+                  "AppErrors": is_error,
+                  "AppThrottles": is_throttled,
+                  "Message": "Transaction execution completed.",
+                  "RequestId": context.aws_request_id
+              }
+              
+              print(json.dumps(emf_payload))
+              
+              if is_error:
+                  raise Exception("Simulated Downstream Business Error")
+                  
+              return {"statusCode": 200, "body": "Success"}
+
+  LambdaLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-MetricsGenerator'
+      RetentionInDays: 14
+
+  # =========================================================================
+  # LAYER 3: OBSERVABILITY DASHBOARD & ALARMS
+  # =========================================================================
+  ErrorRateAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-High-Error-Rate'
+      AlarmDescription: 'Triggers when EMF reporting captures application level errors.'
+      Namespace: 'ServerlessApp'
+      MetricName: 'AppErrors'
+      Dimensions:
+        - Name: 'FunctionName'
+          Value: !Sub '${AWS::StackName}-MetricsGenerator'
+      Statistic: 'Sum'
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 2
+      ComparisonOperator: 'GreaterThanThreshold'
+      TreatMissingData: 'notBreaching'
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+
+  ThrottleAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-High-Throttling'
+      AlarmDescription: 'Triggers when Lambda hits concurrency quota limits (Throttling).'
+      Namespace: 'ServerlessApp'
+      MetricName: 'AppThrottles'
+      Dimensions:
+        - Name: 'FunctionName'
+          Value: !Sub '${AWS::StackName}-MetricsGenerator'
+      Statistic: 'Sum'
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold'
+      TreatMissingData: 'notBreaching'
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+
+  ObservabilityDashboard:
+    Type: 'AWS::CloudWatch::Dashboard'
+    Properties:
+      DashboardName: !Sub '${AWS::StackName}-Health-Dashboard'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 8, "height": 6,
+              "properties": {
+                "metrics": [ [ "ServerlessApp", "AppErrors", "FunctionName", "${AWS::StackName}-MetricsGenerator", { "stat": "Sum", "color": "#d13212" } ] ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "title": "Application Errors (Via EMF)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 0, "width": 8, "height": 6,
+              "properties": {
+                "metrics": [ [ "ServerlessApp", "AppLatency", "FunctionName", "${AWS::StackName}-MetricsGenerator", { "stat": "Average", "color": "#1f77b4" } ] ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "title": "Application Latency (Via EMF)"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 0, "width": 8, "height": 6,
+              "properties": {
+                "metrics": [ [ "ServerlessApp", "AppThrottles", "FunctionName", "${AWS::StackName}-MetricsGenerator", { "stat": "Sum", "color": "#ff9896" } ] ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "title": "Application Throttles (Via EMF)"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0, "y": 6, "width": 24, "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/lambda/${AWS::StackName}-MetricsGenerator' | fields @timestamp, AppLatency, AppErrors, RequestId | filter AppErrors = 1 | sort @timestamp desc | limit 10",
+                "region": "${AWS::Region}",
+                "title": "Logs Insights: Live Error Debugger"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  LambdaFunctionName:
+    Value: !Ref AppMetricsLambdaFunction
+  DashboardURL:
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards/dashboard/${AWS::StackName}-Health-Dashboard'
