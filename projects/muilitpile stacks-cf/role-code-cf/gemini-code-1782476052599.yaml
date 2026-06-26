@@ -1,0 +1,37 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Child Stack 1: IAM Role and Instance Profile for EC2'
+
+Parameters:
+  EnvType:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+  EC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Sub '${EnvType}-ec2-ssm-role'
+      AssumeRolePolicyDocument:
+        Version: '2010-10-01'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      InstanceProfileName: !Sub '${EnvType}-ec2-instance-profile'
+      Roles:
+        - !Ref EC2Role
+
+Outputs:
+  InstanceProfileArn:
+    Description: 'ARN of the IAM Instance Profile'
+    Value: !GetAtt EC2InstanceProfile.Arn
