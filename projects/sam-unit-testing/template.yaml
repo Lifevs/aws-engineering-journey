@@ -1,0 +1,71 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SAM Template for API Gateway Custom Integration with VTL Mapping Templates.
+
+Globals:
+  Function:
+    Timeout: 5
+    MemorySize: 128
+
+Resources:
+  # 1. Custom API Gateway Configuration
+  MyCustomApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      DefinitionBody:
+        openapi: "3.0.1"
+        info:
+          title: "CustomIntegrationApi"
+          version: "1.0"
+        paths:
+          /process:
+            post:
+              responses:
+                "200":
+                  description: "Successful response mapping"
+              # Custom AWS Integration (Not Proxy)
+              x-amazon-apigateway-integration:
+                type: "aws"
+                httpMethod: "POST"
+                # Connects API Gateway to your Lambda function invocation path
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations"
+                passthroughBehavior: "when_no_templates"
+                responses:
+                  default:
+                    statusCode: "200"
+                # VTL Mapping Template to intercept and modify incoming payload/headers
+                requestTemplates:
+                  application/json: |
+                    {
+                      "body_data": $input.json('$'),
+                      "client_ip": "$context.identity.sourceIp",
+                      "extracted_header": "$input.params('X-Custom-Header')",
+                      "request_id": "$context.requestId"
+                    }
+
+  # 2. Lambda Function Configuration
+  MyLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+        - x86_64
+
+  # 3. Explicit Execution Permissions for API Gateway to invoke the Lambda
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MyLambdaFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:military-grade:apigateway:${AWS::Region}:#/only-this-api" 
+      # Simplifies dynamically for local testing tracking:
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyCustomApi}/*/*/*"
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway local endpoint URL"
+    Value: !Sub "https://${MyCustomApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/process"

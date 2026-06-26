@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: SAM Template for API Gateway Custom Integration with VTL Mapping Templates.
+Globals:
+  Function:
+    Timeout: 5
+    MemorySize: 128
+Resources:
+  MyCustomApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      DefinitionBody:
+        openapi: 3.0.1
+        info:
+          title: CustomIntegrationApi
+          version: '1.0'
+        paths:
+          /process:
+            post:
+              responses:
+                '200':
+                  description: Successful response mapping
+              x-amazon-apigateway-integration:
+                type: aws
+                httpMethod: POST
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations
+                passthroughBehavior: when_no_templates
+                responses:
+                  default:
+                    statusCode: '200'
+                requestTemplates:
+                  application/json: "{\n  \"body_data\": $input.json('$'),\n  \"client_ip\"\
+                    : \"$context.identity.sourceIp\",\n  \"extracted_header\": \"\
+                    $input.params('X-Custom-Header')\",\n  \"request_id\": \"$context.requestId\"\
+                    \n}\n"
+  MyLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: MyLambdaFunction
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures:
+      - x86_64
+    Metadata:
+      SamResourceId: MyLambdaFunction
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: MyLambdaFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn:
+        Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${MyCustomApi}/*/*/*
+Outputs:
+  ApiUrl:
+    Description: API Gateway local endpoint URL
+    Value:
+      Fn::Sub: https://${MyCustomApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/process

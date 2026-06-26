@@ -1,0 +1,8 @@
+{
+  "body_data": {
+    "username": "Lokeshwara"
+  },
+  "client_ip": "127.0.0.1",
+  "extracted_header": "GoldenJacketActiveToken123",
+  "request_id": "test-request-id-456"
+}                                               
