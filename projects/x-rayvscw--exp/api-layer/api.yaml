@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  API Gateway layer for the School Portal application.
+  Integrates with existing Lambda functions (StudentFunction, TeacherFunction, AdminFunction)
+  via Lambda Proxy Integration.
+
+# ==============================================================================
+# PARAMETERS
+# Only the Compute stack name is needed — all Lambda ARNs are resolved via
+# !ImportValue so there is no manual ARN copy-paste required.
+# ==============================================================================
+Parameters:
+
+  ComputeStackName:
+    Type: String
+    Description: >
+      Name of the Layer 2 (Compute) CloudFormation stack. Used to import the
+      three Lambda function ARNs via cross-stack references.
+
+  StageName:
+    Type: String
+    Default: prod
+    Description: Name of the API Gateway deployment stage.
+
+# ==============================================================================
+# RESOURCES
+# ==============================================================================
+Resources:
+
+  # ----------------------------------------------------------------------------
+  # 1. REST API
+  # ----------------------------------------------------------------------------
+  SchoolPortalApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: SchoolPortalApi
+      Description: REST API for the School Portal — routes requests to Student, Teacher, and Admin Lambda functions.
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Project
+          Value: SchoolPortal
+        - Key: Layer
+          Value: API
+
+  # ----------------------------------------------------------------------------
+  # 2. RESOURCES (URL paths)
+  # ----------------------------------------------------------------------------
+
+  # /students
+  StudentsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SchoolPortalApi
+      ParentId: !GetAtt SchoolPortalApi.RootResourceId
+      PathPart: students
+
+  # /teachers
+  TeachersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SchoolPortalApi
+      ParentId: !GetAtt SchoolPortalApi.RootResourceId
+      PathPart: teachers
+
+  # /admin
+  AdminResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SchoolPortalApi
+      ParentId: !GetAtt SchoolPortalApi.RootResourceId
+      PathPart: admin
+
+  # ----------------------------------------------------------------------------
+  # 3. METHODS — Lambda Proxy Integration
+  # ----------------------------------------------------------------------------
+
+  # GET /students  →  StudentFunction
+  StudentsGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SchoolPortalApi
+      ResourceId: !Ref StudentsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY                        # Lambda Proxy Integration
+        IntegrationHttpMethod: POST            # API GW always calls Lambda via POST internally
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !ImportValue
+              'Fn::Sub': '${ComputeStackName}-StudentFunctionArn'
+
+  # POST /teachers  →  TeacherFunction
+  TeachersPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SchoolPortalApi
+      ResourceId: !Ref TeachersResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !ImportValue
+              'Fn::Sub': '${ComputeStackName}-TeacherFunctionArn'
+
+  # GET /admin  →  AdminFunction
+  AdminGetMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref SchoolPortalApi
+      ResourceId: !Ref AdminResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !ImportValue
+              'Fn::Sub': '${ComputeStackName}-AdminFunctionArn'
+
+  # ----------------------------------------------------------------------------
+  # 4. LAMBDA PERMISSIONS
+  # Grant API Gateway the invoke permission for each function.
+  # Without these, API Gateway receives a 403 from Lambda and the endpoint fails.
+  # Source ARN is scoped to this specific API + stage + method to follow
+  # least-privilege best practice.
+  # ----------------------------------------------------------------------------
+
+  StudentFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue
+        'Fn::Sub': '${ComputeStackName}-StudentFunctionArn'
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SchoolPortalApi}/${StageName}/GET/students
+
+  TeacherFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue
+        'Fn::Sub': '${ComputeStackName}-TeacherFunctionArn'
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SchoolPortalApi}/${StageName}/POST/teachers
+
+  AdminFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue
+        'Fn::Sub': '${ComputeStackName}-AdminFunctionArn'
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SchoolPortalApi}/${StageName}/GET/admin
+
+  # ----------------------------------------------------------------------------
+  # 5. DEPLOYMENT
+  # A Deployment snapshot must exist before a Stage can reference it.
+  # DependsOn ensures all three methods are created first; otherwise API GW
+  # may snapshot an empty API and the stage will have no routes.
+  # ----------------------------------------------------------------------------
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - StudentsGetMethod
+      - TeachersPostMethod
+      - AdminGetMethod
+    Properties:
+      RestApiId: !Ref SchoolPortalApi
+      Description: Initial deployment of the School Portal API
+
+  # ----------------------------------------------------------------------------
+  # 6. STAGE — 'prod'
+  # ----------------------------------------------------------------------------
+  ProdStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref SchoolPortalApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref StageName
+      Description: Production stage for the School Portal API
+      # Enable basic CloudWatch logging and metrics per method
+      MethodSettings:
+        - ResourcePath: /*
+          HttpMethod: '*'
+          MetricsEnabled: true
+          DataTraceEnabled: false   # set true only for debugging — logs full request/response bodies
+          LoggingLevel: INFO
+      Tags:
+        - Key: Project
+          Value: SchoolPortal
+        - Key: Environment
+          Value: !Ref StageName
+
+# ==============================================================================
+# OUTPUTS
+# ==============================================================================
+Outputs:
+
+  ApiId:
+    Description: REST API ID
+    Value: !Ref SchoolPortalApi
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiId
+
+  ApiRootUrl:
+    Description: Base invoke URL for the prod stage
+    Value: !Sub https://${SchoolPortalApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiRootUrl
+
+  StudentsEndpoint:
+    Description: GET /students endpoint URL
+    Value: !Sub https://${SchoolPortalApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/students
+
+  TeachersEndpoint:
+    Description: POST /teachers endpoint URL
+    Value: !Sub https://${SchoolPortalApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/teachers
+
+  AdminEndpoint:
+    Description: GET /admin endpoint URL
+    Value: !Sub https://${SchoolPortalApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/admin

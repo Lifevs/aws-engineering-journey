@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Layer 2: Compute and IAM for School Observability Project'
+
+Parameters:
+  DataStackName:
+    Type: String
+    Description: The name of the Layer 1 CloudFormation stack to import the DynamoDB table name.
+
+Resources:
+  # ---------------------------------------------------------
+  # 1. IAM Roles (Strict Least Privilege)
+  # ---------------------------------------------------------
+  StudentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: StudentDynamoDBRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource: !ImportValue 
+                  'Fn::Sub': '${DataStackName}-SchoolTableArn'
+
+  TeacherLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: TeacherDynamoDBWriteRead
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                Resource: !ImportValue 
+                  'Fn::Sub': '${DataStackName}-SchoolTableArn'
+
+  AdminLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: AdminDynamoDBAdmin
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource: !ImportValue 
+                  'Fn::Sub': '${DataStackName}-SchoolTableArn'
+
+  # ---------------------------------------------------------
+  # 2. Lambda Functions
+  # ---------------------------------------------------------
+  StudentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SchoolPortal-StudentFunction
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt StudentLambdaRole.Arn
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue 
+            'Fn::Sub': '${DataStackName}-SchoolTableName'
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              console.log("Student function invoked");
+              return { statusCode: 200, body: "Student Data" };
+          };
+
+  TeacherFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SchoolPortal-TeacherFunction
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt TeacherLambdaRole.Arn
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue 
+            'Fn::Sub': '${DataStackName}-SchoolTableName'
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              console.log("Teacher function invoked");
+              return { statusCode: 200, body: "Teacher Data" };
+          };
+
+  AdminFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: SchoolPortal-AdminFunction
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt AdminLambdaRole.Arn
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          TABLE_NAME: !ImportValue 
+            'Fn::Sub': '${DataStackName}-SchoolTableName'
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              console.log("Admin function invoked");
+              return { statusCode: 200, body: "Admin Data" };
+          };
+
+# ==============================================================================
+# OUTPUTS — Export Lambda ARNs so the API Gateway stack can import them
+#           without requiring manual ARN copy-paste.
+# ==============================================================================
+Outputs:
+
+  StudentFunctionArn:
+    Description: ARN of the StudentFunction Lambda
+    Value: !GetAtt StudentFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-StudentFunctionArn'
+
+  TeacherFunctionArn:
+    Description: ARN of the TeacherFunction Lambda
+    Value: !GetAtt TeacherFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TeacherFunctionArn'
+
+  AdminFunctionArn:
+    Description: ARN of the AdminFunction Lambda
+    Value: !GetAtt AdminFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AdminFunctionArn'
