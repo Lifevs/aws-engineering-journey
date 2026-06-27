@@ -98,11 +98,116 @@ Resources:
             'Fn::Sub': '${DataStackName}-SchoolTableName'
       Code:
         ZipFile: |
+          /**
+           * SchoolPortal — StudentFunction  (CommonJS for inline ZipFile deployment)
+           *
+           * IAM: dynamodb:Query only — student can only read their own data.
+           * X-Ray: captureAWSv3Client wraps every DynamoDB call as a traced subsegment.
+           *
+           * Routes (GET /students?...):
+           *   ?studentId=S001                   → own profile
+           *   ?studentId=S001&type=grades       → all grades + calculated GPA
+           *   ?studentId=S001&type=assignments  → all assignments
+           *
+           * Data model (PK / SK):
+           *   Profile    PK=STUDENT#<id>  SK=PROFILE
+           *   Grade      PK=STUDENT#<id>  SK=GRADE#<subject>#<date>
+           *   Assignment PK=STUDENT#<id>  SK=ASSIGNMENT#<assignmentId>
+           */
+          
+          "use strict";
+          
+          const { DynamoDBClient }          = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient,
+                  QueryCommand }            = require("@aws-sdk/lib-dynamodb");
+          const AWSXRay                     = require("aws-xray-sdk-core");
+          
+          // ── X-Ray: wrap the DynamoDB client — every send() call becomes a subsegment
+          const rawClient = new DynamoDBClient({ region: process.env.AWS_REGION });
+          const ddb       = DynamoDBDocumentClient.from(AWSXRay.captureAWSv3Client(rawClient));
+          const TABLE     = process.env.TABLE_NAME;
+          
+          // ── Structured logger — JSON lines appear cleanly in CloudWatch Log Insights
+          const log = (level, msg, extra = {}) =>
+            console.log(JSON.stringify({ level, msg, ts: new Date().toISOString(), ...extra }));
+          
+          // ── Standard API Gateway proxy response
+          const respond = (status, body) => ({
+            statusCode: status,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          
           exports.handler = async (event) => {
-              console.log("Student function invoked");
-              return { statusCode: 200, body: "Student Data" };
+            const segment = AWSXRay.resolveSegment();
+            const { studentId, type = "profile" } = event.queryStringParameters || {};
+          
+            log("INFO", "Student invoked", { method: event.httpMethod, studentId, type });
+          
+            if (!studentId) {
+              log("WARN", "Missing studentId");
+              return respond(400, { error: "studentId query parameter is required" });
+            }
+          
+            // X-Ray annotations are indexed — use them to filter traces in the console:
+            // Traces → Filter → annotation.studentId = "S001"
+            segment?.addAnnotation("studentId", studentId);
+            segment?.addAnnotation("queryType", type);
+          
+            try {
+              const pk = `STUDENT#${studentId}`;
+          
+              if (type === "profile") {
+                // ── Exact item lookup: PK + SK = PROFILE ──────────────────────────────
+                log("INFO", "Fetching profile", { studentId });
+                const res = await ddb.send(new QueryCommand({
+                  TableName: TABLE,
+                  KeyConditionExpression: "PK = :pk AND SK = :sk",
+                  ExpressionAttributeValues: { ":pk": pk, ":sk": "PROFILE" },
+                }));
+                if (!res.Items.length) return respond(404, { error: `Student ${studentId} not found` });
+                log("INFO", "Profile found", { item: res.Items[0] });
+                return respond(200, { student: res.Items[0] });
+          
+              } else if (type === "grades") {
+                // ── Range query: all SK beginning with GRADE# ─────────────────────────
+                // X-Ray: DynamoDB subsegment shows Count vs ScannedCount (both equal here)
+                log("INFO", "Fetching grades", { studentId });
+                const res = await ddb.send(new QueryCommand({
+                  TableName: TABLE,
+                  KeyConditionExpression: "PK = :pk AND begins_with(SK, :pre)",
+                  ExpressionAttributeValues: { ":pk": pk, ":pre": "GRADE#" },
+                }));
+                const gpa = res.Items.length
+                  ? (res.Items.reduce((s, g) => s + (g.score || 0), 0) / res.Items.length).toFixed(2)
+                  : null;
+                log("INFO", "Grades fetched", { count: res.Items.length, gpa });
+                return respond(200, { studentId, grades: res.Items, totalGrades: res.Items.length, gpa });
+          
+              } else if (type === "assignments") {
+                // ── Range query: all SK beginning with ASSIGNMENT# ────────────────────
+                log("INFO", "Fetching assignments", { studentId });
+                const res = await ddb.send(new QueryCommand({
+                  TableName: TABLE,
+                  KeyConditionExpression: "PK = :pk AND begins_with(SK, :pre)",
+                  ExpressionAttributeValues: { ":pk": pk, ":pre": "ASSIGNMENT#" },
+                }));
+                log("INFO", "Assignments fetched", { count: res.Items.length });
+                return respond(200, { studentId, assignments: res.Items });
+          
+              } else {
+                log("WARN", "Unknown type", { type });
+                return respond(400, { error: `Unknown type '${type}'. Valid: profile | grades | assignments` });
+              }
+          
+            } catch (err) {
+              // X-Ray: addError turns the segment red in the Service Map
+              segment?.addError(err);
+              log("ERROR", "Handler failed", { error: err.message, stack: err.stack });
+              return respond(500, { error: "Internal server error", detail: err.message });
+            }
           };
-
+          
   TeacherFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -118,11 +223,227 @@ Resources:
             'Fn::Sub': '${DataStackName}-SchoolTableName'
       Code:
         ZipFile: |
+          /**
+           * SchoolPortal — TeacherFunction  (CommonJS for inline ZipFile deployment)
+           *
+           * IAM: dynamodb:Query + dynamodb:PutItem
+           * X-Ray: multi-step traces — see Query latency vs PutItem latency separately.
+           *
+           * Routes (POST /teachers — action in JSON body):
+           *
+           *   { "action": "getClassRoster",  "teacherId": "T001", "classId": "MATH101" }
+           *       → Query all students in a class
+           *
+           *   { "action": "createStudent",  "teacherId": "T001",
+           *     "studentId": "S001", "name": "Alice Kumar", "grade": "10", "email": "alice@school.edu" }
+           *       → PutItem: create student profile (seeds data for student to query)
+           *
+           *   { "action": "postGrade", "teacherId": "T001", "studentId": "S001",
+           *     "subject": "MATH", "score": 92, "letterGrade": "A" }
+           *       → PutItem: grade record (student can then query it)
+           *
+           *   { "action": "createAssignment", "teacherId": "T001", "classId": "MATH101",
+           *     "title": "Chapter 5 HW", "dueDate": "2025-08-01", "maxScore": 100 }
+           *       → PutItem: assignment record
+           *
+           *   { "action": "enrollStudent", "teacherId": "T001",
+           *     "classId": "MATH101", "studentId": "S001" }
+           *       → PutItem: class roster entry
+           *
+           * Data model (PK / SK):
+           *   Student profile  PK=STUDENT#<id>   SK=PROFILE               EntityType=STUDENT_PROFILE
+           *   Grade            PK=STUDENT#<id>   SK=GRADE#<sub>#<date>    EntityType=GRADE
+           *   Assignment       PK=CLASS#<id>     SK=ASSIGNMENT#<uuid>      EntityType=ASSIGNMENT
+           *   Roster entry     PK=CLASS#<id>     SK=STUDENT#<id>           EntityType=ENROLLMENT
+           */
+          
+          "use strict";
+          
+          const { DynamoDBClient }                         = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient, QueryCommand,
+                  PutCommand }                             = require("@aws-sdk/lib-dynamodb");
+          const { randomUUID }                             = require("crypto");
+          const AWSXRay                                    = require("aws-xray-sdk-core");
+          
+          const rawClient = new DynamoDBClient({ region: process.env.AWS_REGION });
+          const ddb       = DynamoDBDocumentClient.from(AWSXRay.captureAWSv3Client(rawClient));
+          const TABLE     = process.env.TABLE_NAME;
+          
+          const log = (level, msg, extra = {}) =>
+            console.log(JSON.stringify({ level, msg, ts: new Date().toISOString(), ...extra }));
+          
+          const respond = (status, body) => ({
+            statusCode: status,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          
           exports.handler = async (event) => {
-              console.log("Teacher function invoked");
-              return { statusCode: 200, body: "Teacher Data" };
+            const segment = AWSXRay.resolveSegment();
+          
+            log("INFO", "Teacher invoked", { method: event.httpMethod });
+          
+            let body;
+            try {
+              body = JSON.parse(event.body || "{}");
+            } catch {
+              return respond(400, { error: "Invalid JSON body" });
+            }
+          
+            const { action, teacherId } = body;
+            if (!action || !teacherId) {
+              return respond(400, { error: "body must include 'action' and 'teacherId'" });
+            }
+          
+            segment?.addAnnotation("teacherId", teacherId);
+            segment?.addAnnotation("action", action);
+          
+            try {
+          
+              // ── ACTION: Get Class Roster ────────────────────────────────────────────
+              if (action === "getClassRoster") {
+                const { classId } = body;
+                if (!classId) return respond(400, { error: "'classId' required" });
+          
+                log("INFO", "Fetching roster", { classId });
+          
+                // X-Ray: you will see this Query subsegment with the key expression logged
+                const res = await ddb.send(new QueryCommand({
+                  TableName: TABLE,
+                  KeyConditionExpression: "PK = :pk AND begins_with(SK, :pre)",
+                  ExpressionAttributeValues: { ":pk": `CLASS#${classId}`, ":pre": "STUDENT#" },
+                }));
+          
+                log("INFO", "Roster fetched", { classId, count: res.Items.length });
+                return respond(200, { classId, teacherId, studentCount: res.Items.length, students: res.Items });
+          
+              // ── ACTION: Create Student Profile (seeds data for student to query) ────
+              } else if (action === "createStudent") {
+                const { studentId, name, grade, email } = body;
+                if (!studentId || !name) return respond(400, { error: "createStudent requires: studentId, name" });
+          
+                const item = {
+                  PK:         `STUDENT#${studentId}`,
+                  SK:         "PROFILE",
+                  EntityType: "STUDENT_PROFILE",
+                  CreatedAt:  new Date().toISOString(),
+                  studentId,
+                  name,
+                  grade:      grade || "Unknown",
+                  email:      email || "",
+                  status:     "ACTIVE",
+                  createdBy:  teacherId,
+                };
+          
+                log("INFO", "Creating student", item);
+                await ddb.send(new PutCommand({
+                  TableName: TABLE,
+                  Item: item,
+                  ConditionExpression: "attribute_not_exists(PK)",   // don't overwrite
+                }));
+          
+                log("INFO", "Student created", { studentId });
+                return respond(201, { message: "Student profile created", student: item });
+          
+              // ── ACTION: Post a Grade ────────────────────────────────────────────────
+              } else if (action === "postGrade") {
+                const { studentId, subject, score, letterGrade } = body;
+                if (!studentId || !subject || score === undefined || !letterGrade) {
+                  return respond(400, { error: "postGrade requires: studentId, subject, score, letterGrade" });
+                }
+          
+                const today = new Date().toISOString().split("T")[0];
+                const item = {
+                  PK:          `STUDENT#${studentId}`,
+                  SK:          `GRADE#${subject}#${today}`,
+                  EntityType:  "GRADE",             // ← GSI EntityTypeIndex key — admin can query all grades
+                  CreatedAt:   new Date().toISOString(),
+                  studentId,
+                  subject,
+                  score:       Number(score),
+                  letterGrade,
+                  gradedBy:    teacherId,
+                };
+          
+                log("INFO", "Writing grade", item);
+          
+                // X-Ray: see two subsegments if you call getClassRoster first then postGrade
+                // — Query appears before PutItem in the trace timeline
+                await ddb.send(new PutCommand({
+                  TableName: TABLE,
+                  Item: item,
+                  ConditionExpression: "attribute_not_exists(PK)",
+                }));
+          
+                log("INFO", "Grade posted", { studentId, subject, score });
+                return respond(201, { message: "Grade recorded", grade: item });
+          
+              // ── ACTION: Create Assignment ───────────────────────────────────────────
+              } else if (action === "createAssignment") {
+                const { classId, title, dueDate, maxScore } = body;
+                if (!classId || !title || !dueDate) {
+                  return respond(400, { error: "createAssignment requires: classId, title, dueDate" });
+                }
+          
+                const assignmentId = randomUUID();
+                const item = {
+                  PK:           `CLASS#${classId}`,
+                  SK:           `ASSIGNMENT#${assignmentId}`,
+                  EntityType:   "ASSIGNMENT",
+                  CreatedAt:    new Date().toISOString(),
+                  assignmentId,
+                  classId,
+                  title,
+                  dueDate,
+                  maxScore:     maxScore ?? 100,
+                  createdBy:    teacherId,
+                  status:       "ACTIVE",
+                };
+          
+                log("INFO", "Creating assignment", item);
+                await ddb.send(new PutCommand({ TableName: TABLE, Item: item }));
+                log("INFO", "Assignment created", { assignmentId, title });
+                return respond(201, { message: "Assignment created", assignment: item });
+          
+              // ── ACTION: Enroll Student in Class ────────────────────────────────────
+              } else if (action === "enrollStudent") {
+                const { classId, studentId } = body;
+                if (!classId || !studentId) return respond(400, { error: "enrollStudent requires: classId, studentId" });
+          
+                const item = {
+                  PK:         `CLASS#${classId}`,
+                  SK:         `STUDENT#${studentId}`,
+                  EntityType: "ENROLLMENT",
+                  CreatedAt:  new Date().toISOString(),
+                  classId,
+                  studentId,
+                  enrolledBy: teacherId,
+                };
+          
+                log("INFO", "Enrolling student", { classId, studentId });
+                await ddb.send(new PutCommand({ TableName: TABLE, Item: item }));
+                log("INFO", "Enrollment done", { classId, studentId });
+                return respond(201, { message: `Student ${studentId} enrolled in ${classId}`, enrollment: item });
+          
+              } else {
+                log("WARN", "Unknown action", { action });
+                return respond(400, {
+                  error: `Unknown action '${action}'`,
+                  validActions: ["getClassRoster", "createStudent", "postGrade", "createAssignment", "enrollStudent"],
+                });
+              }
+          
+            } catch (err) {
+              if (err.name === "ConditionalCheckFailedException") {
+                log("WARN", "ConditionalCheck failed — item already exists", { action, body });
+                return respond(409, { error: "Item already exists. Use admin updateGrade to correct it." });
+              }
+              segment?.addError(err);
+              log("ERROR", "Handler error", { error: err.message, stack: err.stack });
+              return respond(500, { error: "Internal server error", detail: err.message });
+            }
           };
-
+          
   AdminFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -138,11 +459,265 @@ Resources:
             'Fn::Sub': '${DataStackName}-SchoolTableName'
       Code:
         ZipFile: |
+          /**
+           * SchoolPortal — AdminFunction  (CommonJS for inline ZipFile deployment)
+           *
+           * IAM: dynamodb:Scan + dynamodb:UpdateItem
+           * X-Ray: Scan is the most expensive DDB operation — compare its subsegment
+           *        duration against Teacher's Query to see the cost difference visually.
+           *
+           * Routes (GET /admin?action=...):
+           *
+           *   ?action=dashboard
+           *       → Full table Scan, grouped by EntityType
+           *         ⚠️  Intentional Scan — watch latency spike in X-Ray Service Map
+           *
+           *   ?action=getAllStudents
+           *       → Scan filtered to EntityType = STUDENT_PROFILE
+           *
+           *   ?action=getAllGrades
+           *       → Scan filtered to EntityType = GRADE + compute class average
+           *
+           *   ?action=updateGrade&studentId=S001&subject=MATH&date=2025-07-20&newScore=95&newLetter=A
+           *       → UpdateItem on a grade (corrects teacher's posted grade)
+           *
+           *   ?action=updateStudentStatus&studentId=S001&status=ACTIVE|SUSPENDED|GRADUATED
+           *       → UpdateItem on student profile
+           *
+           *   ?action=slowPath
+           *       → 3-second artificial delay then a Scan
+           *         Demo: X-Ray shows Lambda segment is slow but DynamoDB subsegment is fast
+           *         → proves slowness is in YOUR code, not in DynamoDB
+           *
+           *   ?action=errorPath
+           *       → Deliberate throw → red node in X-Ray Service Map + CloudWatch ERROR log
+           *         Demo: trigger a CloudWatch Alarm on Lambda Errors metric
+           */
+          
+          "use strict";
+          
+          const { DynamoDBClient }                           = require("@aws-sdk/client-dynamodb");
+          const { DynamoDBDocumentClient, ScanCommand,
+                  UpdateCommand }                            = require("@aws-sdk/lib-dynamodb");
+          const AWSXRay                                      = require("aws-xray-sdk-core");
+          
+          const rawClient = new DynamoDBClient({ region: process.env.AWS_REGION });
+          const ddb       = DynamoDBDocumentClient.from(AWSXRay.captureAWSv3Client(rawClient));
+          const TABLE     = process.env.TABLE_NAME;
+          
+          const log = (level, msg, extra = {}) =>
+            console.log(JSON.stringify({ level, msg, ts: new Date().toISOString(), ...extra }));
+          
+          const respond = (status, body) => ({
+            statusCode: status,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          
           exports.handler = async (event) => {
-              console.log("Admin function invoked");
-              return { statusCode: 200, body: "Admin Data" };
+            const segment = AWSXRay.resolveSegment();
+            const p       = event.queryStringParameters || {};
+            const { action } = p;
+          
+            log("INFO", "Admin invoked", { action, params: p });
+          
+            if (!action) {
+              return respond(400, {
+                error: "action query parameter is required",
+                validActions: ["dashboard","getAllStudents","getAllGrades",
+                               "updateGrade","updateStudentStatus","slowPath","errorPath"],
+              });
+            }
+          
+            segment?.addAnnotation("action", action);
+            segment?.addMetadata("requestParams", p);   // metadata: visible in trace detail, not indexed
+          
+            try {
+          
+              // ── ACTION 1: Full Dashboard ────────────────────────────────────────────
+              if (action === "dashboard") {
+                log("INFO", "Starting full table Scan");
+          
+                /**
+                 * 🔍 OBSERVABILITY LESSON — Scan vs Query:
+                 * ScannedCount = EVERY item read from disk (you pay for all of them).
+                 * Count        = items that passed the filter (what you actually get).
+                 * X-Ray shows both — a Scan on a large table will dwarf a Teacher Query.
+                 */
+                const res = await ddb.send(new ScanCommand({ TableName: TABLE }));
+          
+                // Group by EntityType for a dashboard summary
+                const grouped = res.Items.reduce((acc, item) => {
+                  const t = item.EntityType || "UNTYPED";
+                  (acc[t] = acc[t] || []).push(item);
+                  return acc;
+                }, {});
+          
+                const summary = Object.fromEntries(Object.entries(grouped).map(([t, arr]) => [t, arr.length]));
+                log("INFO", "Dashboard complete", { totalItems: res.Count, scannedItems: res.ScannedCount, summary });
+          
+                return respond(200, {
+                  message:      "Full table scan complete",
+                  totalItems:   res.Count,
+                  scannedItems: res.ScannedCount,
+                  summary,
+                  items:        res.Items,
+                });
+          
+              // ── ACTION 2: All Students ──────────────────────────────────────────────
+              } else if (action === "getAllStudents") {
+                log("INFO", "Scanning for STUDENT_PROFILE items");
+          
+                const res = await ddb.send(new ScanCommand({
+                  TableName:        TABLE,
+                  FilterExpression: "EntityType = :et",
+                  ExpressionAttributeValues: { ":et": "STUDENT_PROFILE" },
+                }));
+          
+                log("INFO", "Students scan done", { count: res.Count, scanned: res.ScannedCount });
+                return respond(200, { studentCount: res.Count, scannedItems: res.ScannedCount, students: res.Items });
+          
+              // ── ACTION 3: All Grades + Class Average ───────────────────────────────
+              } else if (action === "getAllGrades") {
+                log("INFO", "Scanning for GRADE items");
+          
+                const res = await ddb.send(new ScanCommand({
+                  TableName:        TABLE,
+                  FilterExpression: "EntityType = :et",
+                  ExpressionAttributeValues: { ":et": "GRADE" },
+                }));
+          
+                const avg = res.Items.length
+                  ? (res.Items.reduce((s, g) => s + (g.score || 0), 0) / res.Items.length).toFixed(2)
+                  : null;
+          
+                log("INFO", "Grades scan done", { count: res.Count, avg });
+                return respond(200, { gradeCount: res.Count, classAverage: avg, grades: res.Items });
+          
+              // ── ACTION 4: Correct a Grade ───────────────────────────────────────────
+              } else if (action === "updateGrade") {
+                const { studentId, subject, date, newScore, newLetter } = p;
+                if (!studentId || !subject || !date || !newScore || !newLetter) {
+                  return respond(400, { error: "Requires: studentId, subject, date, newScore, newLetter" });
+                }
+          
+                log("INFO", "Updating grade", { studentId, subject, date });
+          
+                /**
+                 * UpdateItem — direct key lookup, far faster than Scan.
+                 * X-Ray: "DynamoDB.UpdateItem" subsegment will be tiny compared to Scan above.
+                 * This contrast is the core observability lesson.
+                 */
+                const res = await ddb.send(new UpdateCommand({
+                  TableName: TABLE,
+                  Key: { PK: `STUDENT#${studentId}`, SK: `GRADE#${subject}#${date}` },
+                  UpdateExpression:          "SET score = :s, letterGrade = :l, updatedAt = :u, updatedByAdmin = :a",
+                  ConditionExpression:       "attribute_exists(PK)",
+                  ExpressionAttributeValues: {
+                    ":s": Number(newScore),
+                    ":l": newLetter,
+                    ":u": new Date().toISOString(),
+                    ":a": true,
+                  },
+                  ReturnValues: "ALL_NEW",
+                }));
+          
+                log("INFO", "Grade updated", { studentId, subject, updated: res.Attributes });
+                return respond(200, { message: "Grade updated", updatedItem: res.Attributes });
+          
+              // ── ACTION 5: Update Student Status ────────────────────────────────────
+              } else if (action === "updateStudentStatus") {
+                const { studentId, status } = p;
+                const VALID = ["ACTIVE", "SUSPENDED", "GRADUATED"];
+                if (!studentId || !status) return respond(400, { error: "Requires: studentId, status" });
+                if (!VALID.includes(status)) return respond(400, { error: `status must be: ${VALID.join(" | ")}` });
+          
+                log("INFO", "Updating student status", { studentId, status });
+          
+                const res = await ddb.send(new UpdateCommand({
+                  TableName: TABLE,
+                  Key: { PK: `STUDENT#${studentId}`, SK: "PROFILE" },
+                  UpdateExpression:          "SET #st = :s, updatedAt = :u",
+                  ConditionExpression:       "attribute_exists(PK)",
+                  ExpressionAttributeNames:  { "#st": "status" },   // 'status' is a DDB reserved word
+                  ExpressionAttributeValues: { ":s": status, ":u": new Date().toISOString() },
+                  ReturnValues: "ALL_NEW",
+                }));
+          
+                log("INFO", "Status updated", { studentId, status });
+                return respond(200, { message: `Student ${studentId} → ${status}`, updatedItem: res.Attributes });
+          
+              // ── ACTION 6: Slow Path ─────────────────────────────────────────────────
+              } else if (action === "slowPath") {
+                /**
+                 * 🔍 OBSERVABILITY DEMO — Isolating slowness with X-Ray:
+                 *
+                 * The 3-second delay is wrapped in a custom X-Ray subsegment called
+                 * "artificial-delay". In the trace timeline you will see:
+                 *
+                 *   [Lambda segment ——————————————————————— 3.05 s ———]
+                 *     [artificial-delay ——— 3 s ———]
+                 *     [DynamoDB.Scan ——— 50 ms ———]
+                 *
+                 * Conclusion you can draw: DynamoDB is NOT the bottleneck — your code is.
+                 * This is how X-Ray proves where time is actually spent.
+                 *
+                 * Suggested CloudWatch Alarm: p99 Duration > 2000ms → SNS alert
+                 */
+                log("WARN", "slowPath: 3-second artificial delay starting");
+          
+                const delaySeg = segment?.addNewSubsegment("artificial-delay");
+                delaySeg?.addAnnotation("reason", "demo");
+                await sleep(3000);
+                delaySeg?.close();
+          
+                const res = await ddb.send(new ScanCommand({ TableName: TABLE, Limit: 3 }));
+          
+                log("WARN", "slowPath complete", { delayMs: 3000, sampleItems: res.Items.length });
+                return respond(200, {
+                  message:     "Slow path done — check X-Ray trace for artificial-delay subsegment",
+                  delayMs:     3000,
+                  sampleItems: res.Items,
+                });
+          
+              // ── ACTION 7: Error Path ────────────────────────────────────────────────
+              } else if (action === "errorPath") {
+                /**
+                 * 🔍 OBSERVABILITY DEMO — Triggering visible failures:
+                 *
+                 * X-Ray:          Lambda segment turns RED (fault) in Service Map
+                 * CloudWatch Logs: ERROR line with full stack trace
+                 * CloudWatch Metrics: Lambda Errors metric increments → triggers Alarm
+                 *
+                 * Suggested Alarm: Errors >= 1 in 1 minute → SNS → email/Slack
+                 */
+                log("ERROR", "errorPath: intentional error thrown for observability demo");
+                segment?.addAnnotation("intentionalError", true);
+          
+                throw new Error("INTENTIONAL_ERROR: Admin errorPath triggered for observability demo");
+          
+              } else {
+                log("WARN", "Unknown action", { action });
+                return respond(400, {
+                  error: `Unknown action '${action}'`,
+                  validActions: ["dashboard","getAllStudents","getAllGrades",
+                                 "updateGrade","updateStudentStatus","slowPath","errorPath"],
+                });
+              }
+          
+            } catch (err) {
+              if (err.name === "ConditionalCheckFailedException") {
+                log("WARN", "Record not found for update", { action, params: p });
+                return respond(404, { error: "Record not found — verify studentId, subject, and date" });
+              }
+              segment?.addError(err);
+              log("ERROR", "Admin handler error", { error: err.message, stack: err.stack });
+              return respond(500, { error: "Internal server error", detail: err.message });
+            }
           };
-
+          
 # ==============================================================================
 # OUTPUTS — Export Lambda ARNs so the API Gateway stack can import them
 #           without requiring manual ARN copy-paste.

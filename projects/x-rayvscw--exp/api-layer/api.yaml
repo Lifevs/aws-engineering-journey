@@ -28,7 +28,36 @@ Parameters:
 Resources:
 
   # ----------------------------------------------------------------------------
-  # 1. REST API
+  # 1. CLOUDWATCH LOGGING PREREQUISITE
+  # API Gateway requires an account-level IAM role to be registered before
+  # any Stage can enable CloudWatch logging. This is a one-time account
+  # setting — AWS::ApiGateway::Account writes it on your behalf.
+  # The Stage must DependsOn ApiGatewayAccount so the role is registered
+  # before CloudFormation attempts to create the Stage with LoggingLevel set.
+  # ----------------------------------------------------------------------------
+  ApiGatewayCloudWatchRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ApiGatewayCloudWatchLogsRole-${AWS::StackName}
+      Description: Allows API Gateway to push execution logs to CloudWatch Logs.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    DependsOn: ApiGatewayCloudWatchRole
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayCloudWatchRole.Arn
+
+  # ----------------------------------------------------------------------------
+  # 2. REST API
   # ----------------------------------------------------------------------------
   SchoolPortalApi:
     Type: AWS::ApiGateway::RestApi
@@ -45,7 +74,7 @@ Resources:
           Value: API
 
   # ----------------------------------------------------------------------------
-  # 2. RESOURCES (URL paths)
+  # 3. RESOURCES (URL paths)
   # ----------------------------------------------------------------------------
 
   # /students
@@ -73,7 +102,7 @@ Resources:
       PathPart: admin
 
   # ----------------------------------------------------------------------------
-  # 3. METHODS — Lambda Proxy Integration
+  # 4. METHODS — Lambda Proxy Integration
   # ----------------------------------------------------------------------------
 
   # GET /students  →  StudentFunction
@@ -125,7 +154,7 @@ Resources:
               'Fn::Sub': '${ComputeStackName}-AdminFunctionArn'
 
   # ----------------------------------------------------------------------------
-  # 4. LAMBDA PERMISSIONS
+  # 5. LAMBDA PERMISSIONS
   # Grant API Gateway the invoke permission for each function.
   # Without these, API Gateway receives a 403 from Lambda and the endpoint fails.
   # Source ARN is scoped to this specific API + stage + method to follow
@@ -160,7 +189,7 @@ Resources:
       SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SchoolPortalApi}/${StageName}/GET/admin
 
   # ----------------------------------------------------------------------------
-  # 5. DEPLOYMENT
+  # 6. DEPLOYMENT
   # A Deployment snapshot must exist before a Stage can reference it.
   # DependsOn ensures all three methods are created first; otherwise API GW
   # may snapshot an empty API and the stage will have no routes.
@@ -176,10 +205,14 @@ Resources:
       Description: Initial deployment of the School Portal API
 
   # ----------------------------------------------------------------------------
-  # 6. STAGE — 'prod'
+  # 7. STAGE — 'prod'
+  # DependsOn ApiGatewayAccount ensures the CloudWatch role is registered at
+  # the account level before CloudFormation creates this Stage with logging
+  # enabled — without this ordering, the Stage fails with a 400 error.
   # ----------------------------------------------------------------------------
   ProdStage:
     Type: AWS::ApiGateway::Stage
+    DependsOn: ApiGatewayAccount
     Properties:
       RestApiId: !Ref SchoolPortalApi
       DeploymentId: !Ref ApiDeployment
