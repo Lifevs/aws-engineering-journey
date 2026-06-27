@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Layer 1: Foundational Network Stack (VPC, Subnets, IGW, NAT)'
+
+Resources:
+  # 1. The Custom VPC
+  MainVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: GoldenJacket-VPC
+
+  # 2. Public Subnet Example (AZ-A)
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+  
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+
+  # 3. Private App Subnet Example (AZ-A)
+  PrivateAppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+  
+  PrivateDataSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 10.0.7.0/24
+      AvailabilityZone: !Select [0, !GetAZs ''] 
+
+  PrivateDataSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 10.0.8.0/24
+      AvailabilityZone: !Select [1, !GetAZs ''] 
+
+  PrivateDataSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 10.0.9.0/24
+      AvailabilityZone: !Select [2, !GetAZs '']
+
+  # (Note: In a full deployment, we would repeat this for B and C, plus IGW, NATs, and Route Tables)
+
+# 4. Cross-Stack References (The crucial step for our Nested Stacks)
+Outputs:
+  VpcIdExport:
+    Description: The ID of the VPC
+    Value: !Ref MainVPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcId"
+
+  PublicSubnetAExport:
+    Description: Public Subnet A ID
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetA"
+      
+  PrivateAppSubnetAExport:
+    Description: Private App Subnet A ID
+    Value: !Ref PrivateAppSubnetA
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateAppSubnetA"
+  
+  PrivateDataSubnetAExport:
+    Description: Private Data Subnet A ID
+    Value: !Ref PrivateDataSubnetA
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateDataSubnetA"
+
+  PrivateDataSubnetBExport:
+    Description: Private Data Subnet B ID
+    Value: !Ref PrivateDataSubnetB
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateDataSubnetB"
+
+  PrivateDataSubnetCExport:
+    Description: Private Data Subnet C ID
+    Value: !Ref PrivateDataSubnetC
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateDataSubnetC"
+  
+  PublicSubnetBExport:
+    Description: Public Subnet B ID
+    Value: !Ref PublicSubnetB
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetB"

@@ -1,0 +1,68 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Nested Child A: App Tier (EC2 / Logic)'
+
+Resources:
+  # 1. App Tier Security Group
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow internal traffic to App Tier
+      # Cross-Stack Reference: Grabbing VPC from the Network Stack!
+      VpcId: !ImportValue "GoldenJacket-VpcId" 
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 10.0.0.0/16 # Allowing traffic from within VPC
+
+  # 2. App Tier EC2 Instance (Simplified for demo)
+  AppServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: ami-08f44e8eca9095668 # Amazon Linux 2
+      # Cross-Stack Reference: Placing it in the Private Network!
+      SubnetId: !ImportValue "GoldenJacket-PrivateAppSubnetA"
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          # Install Apache and PHP with MySQL extension
+          amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
+          yum install -y httpd mariadb-server
+          systemctl start httpd
+          systemctl enable httpd
+          
+          # Create a simple Web UI to test the DB connection
+          cat << 'EOF' > /var/www/html/index.php
+          <html>
+          <body>
+            <h2>Golden Jacket 3-Tier CRUD Tester</h2>
+            <form method="POST">
+              DB Endpoint: <input type="text" name="endpoint" required><br><br>
+              DB User: <input type="text" name="user" value="admin"><br><br>
+              DB Pass: <input type="password" name="pass" required><br><br>
+              <input type="submit" value="Test Connection">
+            </form>
+            <?php
+              if ($_SERVER["REQUEST_METHOD"] == "POST") {
+                $conn = new mysqli($_POST['endpoint'], $_POST['user'], $_POST['pass']);
+                if ($conn->connect_error) {
+                  echo "<h3 style='color:red;'>Connection Failed: " . $conn->connect_error . "</h3>";
+                } else {
+                  echo "<h3 style='color:green;'>SUCCESS! Connected to RDS Database!</h3>";
+                }
+              }
+            ?>
+          </body>
+          </html>
+          EOF
+
+Outputs:
+  # Crucial Step: Outputting the SG ID so the Root Stack can grab it.
+  # Notice there is NO 'Export' block here. Sibling stacks don't use Export.
+  AppSecurityGroupOut:
+    Description: The ID of the App Tier Security Group
+    Value: !Ref AppSecurityGroup

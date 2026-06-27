@@ -1,0 +1,26 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Layer 2: Master Root Stack'
+
+# 1. The Root Stack asks the human for the password
+Parameters:
+  DatabasePassword:
+    Type: String
+    NoEcho: true
+    Description: Master password for RDS
+
+Resources:
+  # 2. Deploy App Tier
+  AppTierStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://my-s3-bucket.s3.amazonaws.com/app-tier.yaml
+
+  # 3. Deploy Data Tier
+  DataTierStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://my-s3-bucket.s3.amazonaws.com/data-tier.yaml
+      Parameters:
+        SourceAppSecurityGroupId: !GetAtt AppTierStack.Outputs.AppSecurityGroupOut
+        # HERE IS THE FIX: Pass the password down to the child!
+        DBPassword: !Ref DatabasePassword

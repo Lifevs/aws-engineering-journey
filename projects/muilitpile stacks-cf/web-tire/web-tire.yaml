@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Layer 4: Web Tier (Application Load Balancer)'
+
+Parameters:
+  AppSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: The ID of your existing App Tier Security Group (e.g., sg-01234abc)
+  AppInstanceId:
+    Type: String
+    Description: The ID of your existing EC2 Instance (e.g., i-0abcd1234)
+
+Resources:
+  # 1. The Load Balancer Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from the Internet
+      VpcId: !ImportValue GoldenJacket-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # 2. THE PRO TRICK: Inject a rule into the existing App SG!
+  # This tells the EC2 instance to accept traffic from our new ALB.
+  AppSecurityGroupIngressRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 8080 # Assuming your Apache/App runs on 8080, change to 80 if needed!
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  # 3. The Application Load Balancer
+  WebAppALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: GoldenJacket-ALB
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !ImportValue GoldenJacket-PublicSubnetA
+        - !ImportValue GoldenJacket-PublicSubnetB # The new subnet you just added!
+
+  # 4. Target Group (Points to your EC2 instance)
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 8080 # The port your EC2 app is listening on
+      Protocol: HTTP
+      VpcId: !ImportValue GoldenJacket-VpcId
+      TargetType: instance
+      Targets:
+        - Id: !Ref AppInstanceId
+
+  # 5. The Listener (Forwards Port 80 to the Target Group)
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref WebAppALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+Outputs:
+  WebsiteURL:
+    Description: The URL to access your PHP CRUD App!
+    Value: !Sub "http://${WebAppALB.DNSName}"

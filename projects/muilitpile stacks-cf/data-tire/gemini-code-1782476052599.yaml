@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Nested Child B: Data Tier (RDS)'
+
+Parameters:
+  # The Root Stack passes this value in!
+  DBPassword:
+    Type: String
+    NoEcho: true # This hides the password from the AWS Console logs!
+    Description: Database master password
+  SourceAppSecurityGroupId:
+    Type: String
+    Description: The SG ID of the App Tier
+
+Resources: # <--- THIS WAS THE FIX!
+  MyDbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for the Data Tier
+      SubnetIds:
+        # We import the Data subnets from Layer 1!
+        - !ImportValue GoldenJacket-PrivateDataSubnetA
+        - !ImportValue GoldenJacket-PrivateDataSubnetB
+        - !ImportValue GoldenJacket-PrivateDataSubnetC
+
+  # 1. Database Security Group
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow MySQL traffic ONLY from App Tier
+      VpcId: !ImportValue GoldenJacket-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          # Dynamic Sibling Reference!
+          SourceSecurityGroupId: !Ref SourceAppSecurityGroupId
+
+  # 2. RDS Database Instance
+  AppDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBPassword # Golden Jacket Security Practice
+      DBSubnetGroupName: !Ref MyDbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
