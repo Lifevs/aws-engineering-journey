@@ -1,0 +1,324 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Production-grade CRUD backend using AWS SAM, API Gateway REST API, Lambda
+  (Node.js 20.x), and DynamoDB (PAY_PER_REQUEST). IAM roles follow the principle of
+  least privilege.
+
+  '
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    AllowedValues:
+    - dev
+    - staging
+    - prod
+    Description: API Gateway deployment stage name.
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues:
+    - 1
+    - 3
+    - 5
+    - 7
+    - 14
+    - 30
+    - 60
+    - 90
+    - 120
+    - 150
+    - 180
+    - 365
+    Description: CloudWatch Log Group retention period in days.
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    MemorySize: 256
+    Timeout: 29
+    Architectures:
+    - arm64
+    Environment:
+      Variables:
+        TABLE_NAME:
+          Ref: ItemsTable
+        POWERTOOLS_SERVICE_NAME: crud-backend
+        LOG_LEVEL: INFO
+    Tracing: Active
+  Api:
+    TracingEnabled: true
+    MethodSettings:
+    - ResourcePath: /*
+      HttpMethod: '*'
+      MetricsEnabled: true
+      DataTraceEnabled: false
+      LoggingLevel: ERROR
+Resources:
+  ItemsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName:
+        Fn::Sub: ${AWS::StackName}-items
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      AttributeDefinitions:
+      - AttributeName: itemId
+        AttributeType: S
+      KeySchema:
+      - AttributeName: itemId
+        KeyType: HASH
+      Tags:
+      - Key: Project
+        Value: CrudBackend
+      - Key: Environment
+        Value:
+          Ref: StageName
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: ${AWS::StackName}-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: DynamoDBCrudPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: DynamoDBTableAccess
+            Effect: Allow
+            Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:Scan
+            Resource:
+              Fn::GetAtt:
+              - ItemsTable
+              - Arn
+      - PolicyName: CloudWatchLogsPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: CloudWatchLogsAccess
+            Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*:*
+      - PolicyName: XRayTracingPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: XRayDaemonWriteAccess
+            Effect: Allow
+            Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+            Resource: '*'
+  CrudApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name:
+        Fn::Sub: ${AWS::StackName}-api
+      StageName:
+        Ref: StageName
+      EndpointConfiguration:
+        Type: REGIONAL
+      Models:
+        CreateItemModel:
+          type: object
+          required:
+          - name
+          properties:
+            name:
+              type: string
+              minLength: 1
+              maxLength: 256
+            description:
+              type: string
+              maxLength: 1024
+        UpdateItemModel:
+          type: object
+          properties:
+            name:
+              type: string
+              minLength: 1
+              maxLength: 256
+            description:
+              type: string
+              maxLength: 1024
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseTemplates:
+            application/json: '{"error": "Client error", "message": "$context.error.messageString",
+              "requestId": "$context.requestId"}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: '''*'''
+        DEFAULT_5XX:
+          ResponseTemplates:
+            application/json: '{"error": "Internal server error", "message": "$context.error.messageString",
+              "requestId": "$context.requestId"}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: '''*'''
+        BAD_REQUEST_BODY:
+          StatusCode: 400
+          ResponseTemplates:
+            application/json: '{"error": "Bad Request", "message": "$context.error.validationErrorString",
+              "requestId": "$context.requestId"}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: '''*'''
+        MISSING_AUTHENTICATION_TOKEN:
+          StatusCode: 404
+          ResponseTemplates:
+            application/json: '{"error": "Not Found", "message": "The requested route
+              does not exist", "requestId": "$context.requestId"}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: '''*'''
+        REQUEST_TOO_LARGE:
+          StatusCode: 413
+          ResponseTemplates:
+            application/json: '{"error": "Payload Too Large", "requestId": "$context.requestId"}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: '''*'''
+        THROTTLED:
+          StatusCode: 429
+          ResponseTemplates:
+            application/json: '{"error": "Too Many Requests", "message": "Rate limit
+              exceeded", "requestId": "$context.requestId"}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: '''*'''
+  CrudFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName:
+        Fn::Sub: ${AWS::StackName}-crud-handler
+      Handler: app.handler
+      CodeUri: CrudFunction
+      Role:
+        Fn::GetAtt:
+        - LambdaExecutionRole
+        - Arn
+      Description: Handles all CRUD operations for the Items resource.
+      Events:
+        CreateItem:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CrudApi
+            Path: /items
+            Method: POST
+            RequestModel:
+              Model: CreateItemModel
+              Required: true
+              ValidateBody: true
+        GetItem:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CrudApi
+            Path: /items/{itemId}
+            Method: GET
+            RequestParameters:
+            - method.request.path.itemId:
+                Required: true
+        ListItems:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CrudApi
+            Path: /items
+            Method: GET
+        UpdateItem:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CrudApi
+            Path: /items/{itemId}
+            Method: PUT
+            RequestParameters:
+            - method.request.path.itemId:
+                Required: true
+            RequestModel:
+              Model: UpdateItemModel
+              Required: true
+              ValidateBody: true
+        DeleteItem:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: CrudApi
+            Path: /items/{itemId}
+            Method: DELETE
+            RequestParameters:
+            - method.request.path.itemId:
+                Required: true
+    Metadata:
+      SamResourceId: CrudFunction
+  CrudFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: CrudFunction
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${CrudFunction}
+      RetentionInDays:
+        Ref: LogRetentionDays
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for all CRUD endpoints.
+    Value:
+      Fn::Sub: https://${CrudApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-ApiBaseUrl
+  ItemsEndpoint:
+    Description: Items resource endpoint.
+    Value:
+      Fn::Sub: https://${CrudApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/items
+  DynamoDBTableName:
+    Description: DynamoDB table name.
+    Value:
+      Ref: ItemsTable
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-TableName
+  DynamoDBTableArn:
+    Description: DynamoDB table ARN.
+    Value:
+      Fn::GetAtt:
+      - ItemsTable
+      - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-TableArn
+  LambdaFunctionArn:
+    Description: CRUD Lambda function ARN.
+    Value:
+      Fn::GetAtt:
+      - CrudFunction
+      - Arn
+  LambdaExecutionRoleArn:
+    Description: Lambda execution role ARN.
+    Value:
+      Fn::GetAtt:
+      - LambdaExecutionRole
+      - Arn

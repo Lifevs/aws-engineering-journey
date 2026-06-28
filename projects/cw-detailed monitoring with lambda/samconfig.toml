@@ -15,13 +15,15 @@ parallel         = true
 cached           = true
 
 [default.deploy.parameters]
-stack_name          = "crud-backend-prod"
-s3_prefix           = "crud-backend"
-region              = "us-east-1"
+stack_name          = "crud-api"
+s3_prefix           = "crud-api"
 confirm_changeset   = true
 capabilities        = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
 fail_on_empty_changeset = false
-parameter_overrides = "StageName=prod LogRetentionDays=30"
+parameter_overrides = "StageName=\"prod\" LogRetentionDays=\"30\""
+resolve_s3 = true
+image_repositories = []
+disable_rollback = true
 
 [default.validate.parameters]
 lint = true
@@ -29,6 +31,9 @@ lint = true
 # ──────────────────────────────────────────────
 # Staging environment  (maps to: sam deploy --config-env staging)
 # ──────────────────────────────────────────────
+
+[default.global.parameters]
+region = "us-east-1"
 [staging.deploy.parameters]
 stack_name          = "crud-backend-staging"
 s3_prefix           = "crud-backend"

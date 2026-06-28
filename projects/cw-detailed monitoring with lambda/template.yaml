@@ -215,7 +215,11 @@ Resources:
       CodeUri: src/
       Role: !GetAtt LambdaExecutionRole.Arn
       Description: Handles all CRUD operations for the Items resource.
-      ReservedConcurrentExecutions: 50   # Guard against runaway invocations
+      # ReservedConcurrentExecutions is intentionally omitted so the function
+      # draws from the account's unreserved pool. Re-add this once you have
+      # confirmed your account's total concurrency limit (Lambda console →
+      # Account settings) is high enough to accommodate a reservation.
+      # Example: ReservedConcurrentExecutions: 10
       Events:
         # ── Create ──────────────────────────────
         CreateItem:
