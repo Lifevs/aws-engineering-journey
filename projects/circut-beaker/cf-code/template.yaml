@@ -1,0 +1,54 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless Circuit Breaker using API Gateway, Lambda, and DynamoDB.
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 256
+    Runtime: python3.11
+
+Resources:
+  # 1. DynamoDB Table for Circuit State (Cost Optimized: On-Demand)
+  CircuitBreakerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: CircuitBreakerState
+      BillingMode: PAY_PER_REQUEST # Crucial for keeping costs at $0 when idle
+      AttributeDefinitions:
+        - AttributeName: ServiceName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ServiceName
+          KeyType: HASH
+      # Optional: TTL to automatically clean up old circuit states
+      TimeToLiveSpecification:
+        AttributeName: ExpirationTime
+        Enabled: true
+
+  # 2. Lambda Function executing the Payment and managing the Circuit
+  PaymentProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: lambda_payment_handler.lambda_handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref CircuitBreakerTable
+          FAILURE_THRESHOLD: '3'
+          COOLDOWN_SECONDS: '30'
+      Policies:
+        # SAM Policy template granting Lambda CRUD access to our specific table
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CircuitBreakerTable
+      Events:
+        PaymentApi:
+          Type: Api
+          Properties:
+            Path: /pay
+            Method: post
+
+Outputs:
+  PaymentApiUrl:
+    Description: "API Gateway endpoint URL for Prod stage for Payment function"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/pay/"
