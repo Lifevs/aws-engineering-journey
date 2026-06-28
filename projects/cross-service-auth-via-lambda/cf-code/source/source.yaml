@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Layer 1: Target Account IAM Cross-Account Execution Role'
+
+Parameters:
+  SourceAccountId:
+    Type: String
+    Description: 'The 12-digit AWS Account ID of the Source Account (Account A).'
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: 'Must be a valid 12-digit AWS Account ID.'
+    
+  ExternalIdValue:
+    Type: String
+    Description: 'The unique secret string required by the Source Account to assume this role.'
+    NoEcho: true
+    Default: 'GoldenJacketSecret123!'
+
+Resources:
+  CrossAccountS3ListRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: 'CrossAccountS3ListRole'
+      Description: 'Allows an external source account to assume this role and list S3 buckets.'
+      # The Trust Policy establishes WHO can assume the role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${SourceAccountId}:root'
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref ExternalIdValue
+      # The Permission Policy establishes WHAT the assumed role can do
+      Policies:
+        - PolicyName: 'S3ReadOnlyListPolicy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:ListAllMyBuckets'
+                  - 's3:GetBucketLocation'
+                Resource: 'arn:aws:iam::*:*' # Note: ListAllMyBuckets requires global resource matching '*'
+
+Outputs:
+  RoleArn:
+    Description: 'The Amazon Resource Name (ARN) of the created execution role.'
+    Value: !GetAtt CrossAccountS3ListRole.Arn

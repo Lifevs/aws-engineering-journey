@@ -1,0 +1,48 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Layer 2: Source Account IAM User and AssumeRole Policy'
+
+Parameters:
+  TargetAccountId:
+    Type: String
+    Description: 'The 12-digit AWS Account ID of the Target Account (Account B).'
+    AllowedPattern: '^\d{12}$'
+    ConstraintDescription: 'Must be a valid 12-digit AWS Account ID.'
+
+  TargetRoleName:
+    Type: String
+    Description: 'The name of the IAM role to assume in the target account.'
+    Default: 'CrossAccountS3ListRole'
+
+  ExternalIdValue:
+    Type: String
+    Description: 'The unique secret string required to assume the target role.'
+    NoEcho: true
+    Default: 'GoldenJacketSecret123!'
+
+Resources:
+  CloudEngineerUser:
+    Type: 'AWS::IAM::User'
+    Properties:
+      UserName: 'CloudEngineerPracticeUser'
+
+  AssumeTargetRolePolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      ManagedPolicyName: 'AssumeCrossAccountS3ListPolicy'
+      Description: 'Allows assuming the S3 list role in the target account.'
+      Users:
+        - !Ref CloudEngineerUser
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sts:AssumeRole'
+            Resource: !Sub 'arn:aws:iam::${TargetAccountId}:role/${TargetRoleName}'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': !Ref ExternalIdValue
+
+Outputs:
+  UserName:
+    Description: 'The IAM User created in the Source Account.'
+    Value: !Ref CloudEngineerUser
