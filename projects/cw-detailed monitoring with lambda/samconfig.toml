@@ -1,0 +1,39 @@
+# samconfig.toml — SAM CLI deployment configuration
+# Usage:
+#   sam build
+#   sam deploy                         # uses [default.deploy.parameters] below
+#   sam deploy --config-env staging    # uses [staging.deploy.parameters]
+
+version = 0.1
+
+# ──────────────────────────────────────────────
+# Default environment  (maps to: sam deploy)
+# ──────────────────────────────────────────────
+[default.build.parameters]
+use_container    = false          # Set true to use Docker build container for strict reproducibility
+parallel         = true
+cached           = true
+
+[default.deploy.parameters]
+stack_name          = "crud-backend-prod"
+s3_prefix           = "crud-backend"
+region              = "us-east-1"
+confirm_changeset   = true
+capabilities        = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+fail_on_empty_changeset = false
+parameter_overrides = "StageName=prod LogRetentionDays=30"
+
+[default.validate.parameters]
+lint = true
+
+# ──────────────────────────────────────────────
+# Staging environment  (maps to: sam deploy --config-env staging)
+# ──────────────────────────────────────────────
+[staging.deploy.parameters]
+stack_name          = "crud-backend-staging"
+s3_prefix           = "crud-backend"
+region              = "us-east-1"
+confirm_changeset   = false
+capabilities        = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+fail_on_empty_changeset = false
+parameter_overrides = "StageName=staging LogRetentionDays=7"
