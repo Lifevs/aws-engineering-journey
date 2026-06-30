@@ -1,0 +1,392 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "Production-grade AWS Lambda performance tuning & observability ecosystem.
+  Provisions a least-privilege execution role, an X-Ray traced Lambda function simulating
+  a CPU-bound + downstream-I/O production workload, CloudWatch alarms for throttling
+  and concurrency saturation, and a unified CloudWatch dashboard.\n"
+Parameters:
+  ProjectName:
+    Type: String
+    Default: lambda-perf-lab
+    Description: Prefix applied to all resource names for traceability.
+    AllowedPattern: ^[a-z0-9-]{3,40}$
+    ConstraintDescription: Lowercase alphanumeric and hyphens only, 3-40 chars.
+  LambdaMemorySize:
+    Type: Number
+    Default: 128
+    Description: Initial memory allocation (MB) for the target function. Power 
+      Tuning will explore alternatives independently.
+    AllowedValues:
+    - 128
+    - 256
+    - 512
+    - 1024
+    - 1536
+    - 2048
+    - 3008
+  ReservedConcurrencyLimit:
+    Type: Number
+    Default: 10
+    Description: Reserved concurrent executions allocated to the function 
+      (deliberately low to allow throttle simulation).
+    MinValue: 1
+    MaxValue: 1000
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 15
+    Description: Hard timeout for the function, bounding the simulated workload 
+      and downstream call.
+    MinValue: 3
+    MaxValue: 60
+  LogRetentionInDays:
+    Type: Number
+    Default: 14
+    Description: CloudWatch Logs retention period.
+    AllowedValues:
+    - 1
+    - 3
+    - 5
+    - 7
+    - 14
+    - 30
+    - 60
+    - 90
+    - 120
+    - 150
+    - 180
+    - 365
+  ConcurrencyAlarmThresholdPercent:
+    Type: Number
+    Default: 80
+    Description: "Informational label only (used in dashboard annotations) describing
+      the percentage ConcurrencyAlarmThreshold represents of ReservedConcurrencyLimit.
+      CloudFormation cannot perform arithmetic on parameters, so ConcurrencyAlarmThreshold
+      below must be supplied as the pre-computed absolute number (e.g. 8 for 80% of
+      a limit of 10).\n"
+    MinValue: 1
+    MaxValue: 100
+  ConcurrencyAlarmThreshold:
+    Type: Number
+    Default: 8
+    Description: "Absolute ConcurrentExecutions value that triggers the saturation
+      alarm. Must be manually set to (ReservedConcurrencyLimit * ConcurrencyAlarmThresholdPercent
+      / 100), e.g. 8 when ReservedConcurrencyLimit=10 and ConcurrencyAlarmThresholdPercent=80.\n"
+    MinValue: 1
+  AlarmNotificationEmail:
+    Type: String
+    Default: ''
+    Description: "Optional email address subscribed to the alarm SNS topic. Leave
+      blank to skip subscription (alarms and topic are still created).\n"
+Conditions:
+  HasNotificationEmail:
+    Fn::Not:
+    - Fn::Equals:
+      - Ref: AlarmNotificationEmail
+      - ''
+Mappings:
+  RuntimeMap:
+    us-east-1:
+      Runtime: python3.12
+    us-east-2:
+      Runtime: python3.12
+    us-west-2:
+      Runtime: python3.12
+    eu-west-1:
+      Runtime: python3.12
+    eu-central-1:
+      Runtime: python3.12
+    ap-southeast-1:
+      Runtime: python3.12
+    ap-southeast-2:
+      Runtime: python3.12
+    ap-south-1:
+      Runtime: python3.12
+Resources:
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName:
+        Fn::Sub: ${ProjectName}-alarm-topic
+      KmsMasterKeyId: alias/aws/sns
+  AlarmTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      TopicArn:
+        Ref: AlarmTopic
+      Protocol: email
+      Endpoint:
+        Ref: AlarmNotificationEmail
+  TargetFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: /aws/lambda/${ProjectName}-target-function
+      RetentionInDays:
+        Ref: LogRetentionInDays
+  TargetFunctionExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: ${ProjectName}-exec-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: XRayTracingWriteAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: XRayTraceSubmission
+            Effect: Allow
+            Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+            Resource: '*'
+      - PolicyName: CloudWatchLogsWriteAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: LogStreamLifecycle
+            Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+            - Fn::GetAtt:
+              - TargetFunctionLogGroup
+              - Arn
+            - Fn::Sub: ${TargetFunctionLogGroup.Arn}:*
+      - PolicyName: CloudWatchMetricsWriteAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Sid: CustomMetricEmission
+            Effect: Allow
+            Action:
+            - cloudwatch:PutMetricData
+            Resource: '*'
+            Condition:
+              StringEquals:
+                cloudwatch:namespace:
+                  Fn::Sub: ${ProjectName}/Custom
+      Tags:
+      - Key: Project
+        Value:
+          Ref: ProjectName
+  TargetFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: TargetFunctionLogGroup
+    Properties:
+      FunctionName:
+        Fn::Sub: ${ProjectName}-target-function
+      Description: "Simulates a CPU-bound cryptographic workload plus a downstream
+        dependency call, instrumented end-to-end with AWS X-Ray.\n"
+      Runtime:
+        Fn::FindInMap:
+        - RuntimeMap
+        - Ref: AWS::Region
+        - Runtime
+      Handler: handler.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - TargetFunctionExecutionRole
+        - Arn
+      MemorySize:
+        Ref: LambdaMemorySize
+      Timeout:
+        Ref: LambdaTimeoutSeconds
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          HASH_ITERATIONS: '200000'
+          DOWNSTREAM_LATENCY_MIN_MS: '50'
+          DOWNSTREAM_LATENCY_MAX_MS: '250'
+          POWERTOOLS_SERVICE_NAME:
+            Fn::Sub: ${ProjectName}-target-function
+          LOG_LEVEL: INFO
+      Code:
+        ZipFile: "...placeholder...\n # Placeholder inline source. Replace deployment
+          with the packaged\n # artifact at lambda/handler.py (see README) using `sam
+          package` /\n # `aws cloudformation package`, or update this ZipFile block
+          with\n # the contents of lambda/handler.py for single-file deployment.\n\
+          \ import json\n\n def lambda_handler(event, context):\n     return {\n \
+          \        \"statusCode\": 501,\n         \"body\": json.dumps(\n        \
+          \     {\"message\": \"Deploy lambda/handler.py via packaging step before
+          invoking.\"}\n         ),\n     }\n"
+      Tags:
+      - Key: Project
+        Value:
+          Ref: ProjectName
+  TargetFunctionAlias:
+    Type: AWS::Lambda::Alias
+    Properties:
+      FunctionName:
+        Ref: TargetFunction
+      FunctionVersion:
+        Fn::GetAtt:
+        - TargetFunctionCurrentVersion
+        - Version
+      Name: live
+  TargetFunctionCurrentVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName:
+        Ref: TargetFunction
+      Description: Snapshot version published at stack deploy time.
+  ThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: ${ProjectName}-throttle-alarm
+      AlarmDescription: "Fires when the target function is throttled at least once
+        within a single 60-second window, indicating ReservedConcurrentExecutions
+        is being exhausted.\n"
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: TargetFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlarmTopic
+      OKActions:
+      - Ref: AlarmTopic
+  ConcurrencySaturationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: ${ProjectName}-concurrency-saturation-alarm
+      AlarmDescription:
+        Fn::Sub: "Fires when ConcurrentExecutions exceeds ${ConcurrencyAlarmThresholdPercent}%
+          of the ${ReservedConcurrencyLimit} reserved concurrency slots allocated
+          to the target function.\n"
+      Namespace: AWS/Lambda
+      MetricName: ConcurrentExecutions
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: TargetFunction
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold:
+        Ref: ConcurrencyAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+      - Ref: AlarmTopic
+      OKActions:
+      - Ref: AlarmTopic
+  PerformanceDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName:
+        Fn::Sub: ${ProjectName}-performance-dashboard
+      DashboardBody:
+        Fn::Sub: "{\n  \"widgets\": [\n    {\n      \"type\": \"metric\",\n      \"\
+          x\": 0, \"y\": 0, \"width\": 12, \"height\": 6,\n      \"properties\": {\n\
+          \        \"title\": \"Invocations\",\n        \"view\": \"timeSeries\",\n\
+          \        \"stacked\": false,\n        \"region\": \"${AWS::Region}\",\n\
+          \        \"metrics\": [\n          [ \"AWS/Lambda\", \"Invocations\", \"\
+          FunctionName\", \"${TargetFunction}\", { \"stat\": \"Sum\", \"period\":
+          60 } ]\n        ]\n      }\n    },\n    {\n      \"type\": \"metric\",\n\
+          \      \"x\": 12, \"y\": 0, \"width\": 12, \"height\": 6,\n      \"properties\"\
+          : {\n        \"title\": \"Duration (p50 / p90 / p99)\",\n        \"view\"\
+          : \"timeSeries\",\n        \"stacked\": false,\n        \"region\": \"${AWS::Region}\"\
+          ,\n        \"metrics\": [\n          [ \"AWS/Lambda\", \"Duration\", \"\
+          FunctionName\", \"${TargetFunction}\", { \"stat\": \"p50\", \"period\":
+          60, \"label\": \"p50\" } ],\n          [ \"AWS/Lambda\", \"Duration\", \"\
+          FunctionName\", \"${TargetFunction}\", { \"stat\": \"p90\", \"period\":
+          60, \"label\": \"p90\" } ],\n          [ \"AWS/Lambda\", \"Duration\", \"\
+          FunctionName\", \"${TargetFunction}\", { \"stat\": \"p99\", \"period\":
+          60, \"label\": \"p99\" } ]\n        ]\n      }\n    },\n    {\n      \"\
+          type\": \"metric\",\n      \"x\": 0, \"y\": 6, \"width\": 12, \"height\"\
+          : 6,\n      \"properties\": {\n        \"title\": \"Throttles\",\n     \
+          \   \"view\": \"timeSeries\",\n        \"stacked\": false,\n        \"region\"\
+          : \"${AWS::Region}\",\n        \"metrics\": [\n          [ \"AWS/Lambda\"\
+          , \"Throttles\", \"FunctionName\", \"${TargetFunction}\", { \"stat\": \"\
+          Sum\", \"period\": 60 } ]\n        ],\n        \"annotations\": {\n    \
+          \      \"horizontal\": [ { \"label\": \"Throttle threshold\", \"value\"\
+          : 0 } ]\n        }\n      }\n    },\n    {\n      \"type\": \"metric\",\n\
+          \      \"x\": 12, \"y\": 6, \"width\": 12, \"height\": 6,\n      \"properties\"\
+          : {\n        \"title\": \"ConcurrentExecutions vs Reserved Limit\",\n  \
+          \      \"view\": \"timeSeries\",\n        \"stacked\": false,\n        \"\
+          region\": \"${AWS::Region}\",\n        \"metrics\": [\n          [ \"AWS/Lambda\"\
+          , \"ConcurrentExecutions\", \"FunctionName\", \"${TargetFunction}\", { \"\
+          stat\": \"Maximum\", \"period\": 60 } ]\n        ],\n        \"annotations\"\
+          : {\n          \"horizontal\": [\n            { \"label\": \"Reserved Concurrency
+          Limit\", \"value\": ${ReservedConcurrencyLimit} },\n            { \"label\"\
+          : \"Alarm Threshold (${ConcurrencyAlarmThresholdPercent}%)\", \"value\"\
+          : ${ConcurrencyAlarmThreshold} }\n          ]\n        }\n      }\n    },\n\
+          \    {\n      \"type\": \"metric\",\n      \"x\": 0, \"y\": 12, \"width\"\
+          : 24, \"height\": 6,\n      \"properties\": {\n        \"title\": \"Errors
+          vs Successful Invocations\",\n        \"view\": \"timeSeries\",\n      \
+          \  \"stacked\": false,\n        \"region\": \"${AWS::Region}\",\n      \
+          \  \"metrics\": [\n          [ \"AWS/Lambda\", \"Errors\", \"FunctionName\"\
+          , \"${TargetFunction}\", { \"stat\": \"Sum\", \"period\": 60 } ],\n    \
+          \      [ \"AWS/Lambda\", \"Invocations\", \"FunctionName\", \"${TargetFunction}\"\
+          , { \"stat\": \"Sum\", \"period\": 60 } ]\n        ]\n      }\n    }\n \
+          \ ]\n}\n"
+Outputs:
+  TargetFunctionName:
+    Description: Name of the deployed target Lambda function.
+    Value:
+      Ref: TargetFunction
+    Export:
+      Name:
+        Fn::Sub: ${ProjectName}-target-function-name
+  TargetFunctionArn:
+    Description: ARN of the deployed target Lambda function (qualified alias 
+      included where applicable).
+    Value:
+      Fn::GetAtt:
+      - TargetFunction
+      - Arn
+    Export:
+      Name:
+        Fn::Sub: ${ProjectName}-target-function-arn
+  TargetFunctionAliasArn:
+    Description: ARN of the 'live' alias pointing at the current published 
+      version.
+    Value:
+      Ref: TargetFunctionAlias
+  ExecutionRoleArn:
+    Description: ARN of the least-privilege Lambda execution role.
+    Value:
+      Fn::GetAtt:
+      - TargetFunctionExecutionRole
+      - Arn
+  ThrottleAlarmName:
+    Description: CloudWatch Alarm name for Throttles metric.
+    Value:
+      Ref: ThrottleAlarm
+  ConcurrencySaturationAlarmName:
+    Description: CloudWatch Alarm name for ConcurrentExecutions saturation.
+    Value:
+      Ref: ConcurrencySaturationAlarm
+  DashboardURL:
+    Description: Direct console URL to the performance dashboard.
+    Value:
+      Fn::Sub: 
+        https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-performance-dashboard
+  ReservedConcurrencyConfigured:
+    Description: Reserved concurrency limit applied to the function (used by 
+      load test script).
+    Value:
+      Ref: ReservedConcurrencyLimit
+  AlarmTopicArn:
+    Description: SNS topic ARN used for alarm notifications.
+    Value:
+      Ref: AlarmTopic

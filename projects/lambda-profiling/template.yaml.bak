@@ -192,6 +192,7 @@ Resources:
       Role: !GetAtt TargetFunctionExecutionRole.Arn
       MemorySize: !Ref LambdaMemorySize
       Timeout: !Ref LambdaTimeoutSeconds
+      ReservedConcurrentExecutions: !Ref ReservedConcurrencyLimit
       TracingConfig:
         Mode: Active
       Environment:
