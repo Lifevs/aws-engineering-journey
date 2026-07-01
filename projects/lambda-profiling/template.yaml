@@ -201,22 +201,8 @@ Resources:
           DOWNSTREAM_LATENCY_MAX_MS: '250'
           POWERTOOLS_SERVICE_NAME: !Sub '${ProjectName}-target-function'
           LOG_LEVEL: INFO
-      Code:
-        ZipFile: |
-         ...placeholder...
-          # Placeholder inline source. Replace deployment with the packaged
-          # artifact at lambda/handler.py (see README) using `sam package` /
-          # `aws cloudformation package`, or update this ZipFile block with
-          # the contents of lambda/handler.py for single-file deployment.
-          import json
-
-          def lambda_handler(event, context):
-              return {
-                  "statusCode": 501,
-                  "body": json.dumps(
-                      {"message": "Deploy lambda/handler.py via packaging step before invoking."}
-                  ),
-              }
+      Code: ./lambda/build
+        
       Tags:
         - Key: Project
           Value: !Ref ProjectName

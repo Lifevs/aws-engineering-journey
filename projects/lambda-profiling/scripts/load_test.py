@@ -60,6 +60,8 @@ def invoke_for_burst(lambda_client, function_name: str, index: int, start_barrie
     that concurrent execution count genuinely exceeds the reserved limit
     rather than trickling in sequentially.
     """
+def invoke_for_burst(function_name: str, index: int, start_barrier: threading.Barrier, region: str) -> BurstResult:
+    lambda_client = boto3.client("lambda", region_name=region, config=Config(retries={"max_attempts": 0}))
     payload = {"scenario": "load-burst", "index": index}
     start_barrier.wait()
     start = time.perf_counter()

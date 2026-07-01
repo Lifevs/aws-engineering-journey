@@ -1,0 +1,14 @@
+ powerTuningStateMachine-XvH76vSm2CGr |  arn:aws:states:ap-south-1:660235343407:stateMachine:powerTuningStateMachine-XvH76vSm2CGr 
+ arn:aws:lambda:ap-south-1:660235343407:function:lambda-perf-lab-target-function
+
+
+ aws stepfunctions start-execution \
+  --state-machine-arn arn:aws:states:ap-south-1:660235343407:stateMachine:powerTuningStateMachine-XvH76vSm2CGr \
+  --input '{
+    "lambdaARN": "arn:aws:lambda:ap-south-1:660235343407:function:lambda-perf-lab-target-function",
+    "powerValues": [128, 256, 512, 1024, 1536, 2048],
+    "num": 10,
+    "payload": {"scenario": "power-tuning"},
+    "parallelInvocation": true,
+    "strategy": "balanced"
+  }'

@@ -1,21 +1,3 @@
-"""
-Target Lambda function for the performance tuning ecosystem.
-
-Simulates two realistic production characteristics so that AWS X-Ray traces
-and CloudWatch metrics show a non-trivial, memory-sensitive performance
-profile:
-
-  1. CPU-bound work: a configurable number of PBKDF2-HMAC-SHA256 iterations
-     (a real cryptographic primitive, not a synthetic busy-loop), whose wall
-     time scales inversely with allocated memory because Lambda grants vCPU
-     proportionally to MemorySize.
-  2. Downstream I/O: a mocked dependency call wrapped in its own X-Ray
-     subsegment, with randomized latency to emulate network/database jitter.
-
-Both phases are wrapped in explicit X-Ray subsegments so the Service Graph
-and trace timeline clearly separate compute time from I/O wait time.
-"""
-
 import hashlib
 import json
 import logging
@@ -27,8 +9,6 @@ import uuid
 from aws_xray_sdk.core import xray_recorder
 from aws_xray_sdk.core import patch_all
 
-# Patch supported libraries (requests, botocore, etc.) for automatic
-# downstream X-Ray subsegments.
 patch_all()
 
 logger = logging.getLogger()
@@ -40,16 +20,7 @@ DOWNSTREAM_LATENCY_MAX_MS = int(os.environ.get("DOWNSTREAM_LATENCY_MAX_MS", "250
 
 
 def _run_cpu_bound_workload(payload_size_bytes: int = 4096) -> str:
-    """
-    CPU-bound phase: derive a key via PBKDF2-HMAC-SHA256.
-
-    This is representative of real production CPU work (token signing,
-    password hashing, payload checksums) and is sensitive to vCPU
-    allocation, which AWS ties directly to MemorySize. Lower memory
-    configurations will show measurably higher Duration for this phase.
-    """
-    subsegment = xray_recorder.begin_subsegment("cpu_bound_hash_workload")
-    try:
+    with xray_recorder.in_subsegment("cpu_bound_hash_workload") as subsegment:
         random_payload = os.urandom(payload_size_bytes)
         salt = uuid.uuid4().bytes
         start = time.perf_counter()
@@ -59,26 +30,17 @@ def _run_cpu_bound_workload(payload_size_bytes: int = 4096) -> str:
         elapsed_ms = (time.perf_counter() - start) * 1000
         subsegment.put_metadata("hash_iterations", HASH_ITERATIONS)
         subsegment.put_metadata("elapsed_ms", round(elapsed_ms, 2))
-        logger.info(
-            "cpu_bound_workload_complete",
-            extra={"elapsed_ms": round(elapsed_ms, 2), "iterations": HASH_ITERATIONS},
-        )
+        subsegment.put_annotation("phase", "cpu_bound")
+        logger.info(json.dumps({
+            "event": "cpu_workload_complete",
+            "elapsed_ms": round(elapsed_ms, 2),
+            "iterations": HASH_ITERATIONS
+        }))
         return derived_key.hex()
-    finally:
-        xray_recorder.end_subsegment()
 
 
 def _call_downstream_dependency() -> dict:
-    """
-    Downstream I/O phase: mocks a call to an external service or database.
-
-    Wrapped in its own subsegment ('downstream_dependency') so the X-Ray
-    Service Graph renders it as a distinct downstream node, separate from
-    the function's own compute time. Latency is randomized within a
-    configurable band to emulate realistic network jitter.
-    """
-    subsegment = xray_recorder.begin_subsegment("downstream_dependency")
-    try:
+    with xray_recorder.in_subsegment("downstream_dependency") as subsegment:
         simulated_latency_ms = random.randint(
             DOWNSTREAM_LATENCY_MIN_MS, DOWNSTREAM_LATENCY_MAX_MS
         )
@@ -90,44 +52,28 @@ def _call_downstream_dependency() -> dict:
             "status": "OK",
             "latency_ms": simulated_latency_ms,
         }
-        logger.info("downstream_dependency_complete", extra=response)
+        logger.info(json.dumps({"event": "downstream_complete", **response}))
         return response
-    finally:
-        xray_recorder.end_subsegment()
 
 
 def lambda_handler(event: dict, context) -> dict:
-    """
-    Entry point. Orchestrates the CPU-bound and downstream I/O phases and
-    returns timing + metadata useful for the Performance Testing simulation
-    script (Script A) to compare across MemorySize configurations.
-    """
     invocation_start = time.perf_counter()
-
-    xray_recorder.put_annotation("function_version", context.function_version)
-    xray_recorder.put_annotation(
-        "memory_limit_mb", context.memory_limit_in_mb
-    )
-    xray_recorder.put_annotation(
-        "request_id", context.aws_request_id
-    )
 
     derived_key_hex = _run_cpu_bound_workload()
     downstream_result = _call_downstream_dependency()
 
     total_elapsed_ms = (time.perf_counter() - invocation_start) * 1000
-    remaining_ms = context.get_remaining_time_in_millis()
 
     response_body = {
         "request_id": context.aws_request_id,
         "memory_limit_mb": context.memory_limit_in_mb,
         "total_elapsed_ms": round(total_elapsed_ms, 2),
-        "remaining_time_ms_at_completion": remaining_ms,
+        "remaining_time_ms_at_completion": context.get_remaining_time_in_millis(),
         "downstream_result": downstream_result,
         "derived_key_fingerprint": derived_key_hex[:16],
     }
 
-    logger.info("invocation_complete", extra=response_body)
+    logger.info(json.dumps({"event": "invocation_complete", **response_body}))
 
     return {
         "statusCode": 200,
