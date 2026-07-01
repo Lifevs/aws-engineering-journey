@@ -1,0 +1,40 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        stage: [dev, test]   # runs the full suite against both aliases
+
+    env:
+      AWS_REGION: us-east-1
+      STAGE: ${{ matrix.stage }}
+      API_BASE_URL: https://k9vv820z63.execute-api.us-east-1.amazonaws.com
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Install dependencies
+        run: pip install -r projects/lambda-event/requirements-test.txt
+
+      - name: Run integration tests (${{ matrix.stage }})
+        working-directory: projects/lambda-event/tests
+        run: pytest -v
