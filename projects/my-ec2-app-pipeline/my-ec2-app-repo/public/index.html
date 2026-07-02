@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Salt &amp; Sand — Trip Journal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,300;0,500;0,600;1,500&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+  <header class="hero">
+    <div class="hero__frame">
+      <div class="hero__postmark">EST. IN&nbsp;THE&nbsp;CLOUD</div>
+      <h1 class="hero__title">Salt&nbsp;&amp;&nbsp;Sand</h1>
+      <p class="hero__subtitle">a trip journal, served from wherever this instance happens to be standing</p>
+      <a class="hero__scroll" href="#gallery">see the postcards ↓</a>
+    </div>
+  </header>
+
+  <main>
+    <section id="gallery" class="gallery">
+      <h2 class="section-label">01 — Postcards from the coast</h2>
+      <div class="gallery__grid">
+        <figure class="gallery__item gallery__item--tall">
+          <img src="https://picsum.photos/seed/saltsand-shore/900/1200" alt="Wide coastal shoreline at low tide" loading="lazy">
+          <figcaption>low tide, somewhere south</figcaption>
+        </figure>
+        <figure class="gallery__item">
+          <img src="https://picsum.photos/seed/saltsand-cove/900/700" alt="Quiet cove between two cliffs" loading="lazy">
+          <figcaption>the quiet cove</figcaption>
+        </figure>
+        <figure class="gallery__item">
+          <img src="https://picsum.photos/seed/saltsand-dock/900/700" alt="Wooden dock stretching into calm water" loading="lazy">
+          <figcaption>last dock before the open water</figcaption>
+        </figure>
+        <figure class="gallery__item gallery__item--wide">
+          <img src="https://picsum.photos/seed/saltsand-horizon/1400/800" alt="Sunset horizon over open ocean" loading="lazy">
+          <figcaption>the horizon line, every evening</figcaption>
+        </figure>
+        <figure class="gallery__item">
+          <img src="https://picsum.photos/seed/saltsand-dunes/900/700" alt="Sand dunes with sparse grass" loading="lazy">
+          <figcaption>dune trail, sand still warm</figcaption>
+        </figure>
+        <figure class="gallery__item">
+          <img src="https://picsum.photos/seed/saltsand-boats/900/700" alt="Small boats anchored near shore" loading="lazy">
+          <figcaption>harbor, off season</figcaption>
+        </figure>
+      </div>
+      <p class="gallery__note">placeholder imagery — swap the <code>picsum.photos</code> URLs in <code>public/index.html</code> for your own trip photos any time.</p>
+    </section>
+
+    <section id="boarding-pass" class="boarding">
+      <h2 class="section-label">02 — This page's boarding pass</h2>
+      <p class="boarding__intro">every postcard has to be mailed from somewhere. here's the machine that sent this one.</p>
+
+      <div class="pass" id="pass">
+        <div class="pass__main">
+          <div class="pass__row pass__row--route">
+            <div class="pass__field">
+              <span class="pass__label">from</span>
+              <span class="pass__value pass__value--big" id="pass-region">—</span>
+            </div>
+            <div class="pass__plane">✈</div>
+            <div class="pass__field pass__field--right">
+              <span class="pass__label">gate</span>
+              <span class="pass__value pass__value--big" id="pass-az">—</span>
+            </div>
+          </div>
+
+          <div class="pass__divider"></div>
+
+          <div class="pass__grid">
+            <div class="pass__field">
+              <span class="pass__label">instance id</span>
+              <span class="pass__value" id="pass-instance-id">—</span>
+            </div>
+            <div class="pass__field">
+              <span class="pass__label">instance type</span>
+              <span class="pass__value" id="pass-instance-type">—</span>
+            </div>
+            <div class="pass__field">
+              <span class="pass__label">public ip</span>
+              <span class="pass__value" id="pass-public-ip">—</span>
+            </div>
+            <div class="pass__field">
+              <span class="pass__label">private ip</span>
+              <span class="pass__value" id="pass-local-ip">—</span>
+            </div>
+            <div class="pass__field">
+              <span class="pass__label">cpu</span>
+              <span class="pass__value" id="pass-cpu">—</span>
+            </div>
+            <div class="pass__field">
+              <span class="pass__label">cores</span>
+              <span class="pass__value" id="pass-cores">—</span>
+            </div>
+            <div class="pass__field">
+              <span class="pass__label">memory</span>
+              <span class="pass__value" id="pass-memory">—</span>
+            </div>
+            <div class="pass__field">
+              <span class="pass__label">uptime</span>
+              <span class="pass__value" id="pass-uptime">—</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="pass__stub">
+          <span class="pass__stub-label">hostname</span>
+          <span class="pass__stub-value" id="pass-hostname">—</span>
+          <div class="pass__barcode" aria-hidden="true"></div>
+          <span class="pass__stub-footer" id="pass-source">checking origin…</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>deployed via CodePipeline → CodeBuild → CodeDeploy, running plainly on EC2</p>
+  </footer>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
