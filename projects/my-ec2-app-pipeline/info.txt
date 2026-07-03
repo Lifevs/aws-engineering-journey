@@ -1,0 +1,19 @@
+[
+    {
+        "OutputKey": "AppInstancePublicIp",
+        "OutputValue": "32.196.110.193"
+    },
+    {
+        "OutputKey": "PipelineName",
+        "OutputValue": "my-ec2-app-pipeline"
+    },
+    {
+        "OutputKey": "CodeArtifactRepoEndpoint",
+        "OutputValue": "my-ec2-app-deps",
+        "Description": "Run \"aws codeartifact get-repository-endpoint\" to fetch the URL"
+    },
+    {
+        "OutputKey": "RepoCloneUrlHttp",
+        "OutputValue": "https://git-codecommit.us-east-1.amazonaws.com/v1/repos/my-ec2-app-repo"
+    }
+]

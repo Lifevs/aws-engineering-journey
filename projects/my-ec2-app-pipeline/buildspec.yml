@@ -1,0 +1,44 @@
+version: 0.2
+
+env:
+  variables:
+    CODEARTIFACT_DOMAIN: "my-ec2-app-domain"
+    CODEARTIFACT_REPO: "my-ec2-app-deps"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - echo "Logging in to CodeArtifact for dependency resolution..."
+      - export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain $CODEARTIFACT_DOMAIN --domain-owner $AWS_ACCOUNT_ID --query authorizationToken --output text)
+      - aws codeartifact login --tool npm --repository $CODEARTIFACT_REPO --domain $CODEARTIFACT_DOMAIN --domain-owner $AWS_ACCOUNT_ID
+
+  pre_build:
+    commands:
+      - echo "Installing dependencies from CodeArtifact..."
+      - npm install
+
+  build:
+    commands:
+      - echo "Running unit tests..."
+      - npm test
+      - echo "Building application..."
+      - npm run build --if-present
+
+  post_build:
+    commands:
+      - echo "Build completed on $(date)"
+
+artifacts:
+  files:
+    - '**/*'
+  base-directory: '.'
+  discard-paths: no
+
+# These files must be part of the artifact output so CodeDeploy can use them:
+#   appspec.yml
+#   scripts/before_install.sh
+#   scripts/after_install.sh
+#   scripts/start_application.sh
+#   scripts/validate_service.sh

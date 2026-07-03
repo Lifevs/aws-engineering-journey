@@ -1,0 +1,16 @@
+{
+  "name": "ec2-trip-demo",
+  "version": "1.0.0",
+  "description": "Small demo webpage (beach/trip gallery + live EC2 instance info) deployed via CodePipeline to EC2",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"no tests yet\" && exit 0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
