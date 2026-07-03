@@ -1,0 +1,38 @@
+version: 0.2
+
+# Expected CodeBuild environment variables (set as plaintext env vars on the
+# CodeBuild project, or injected by CloudFormation - see cloudformation/pipeline.yaml):
+#   AWS_ACCOUNT_ID   - your account id
+#   AWS_DEFAULT_REGION - e.g. us-east-1
+#   IMAGE_REPO_NAME  - ECR repo name, e.g. ecs-demo-app
+#   CONTAINER_NAME   - must match the containerName in task-definition.json
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH:-latest}
+      - echo Image will be tagged as $IMAGE_TAG
+
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Building the Docker image...
+      - docker build --build-arg APP_VERSION=$IMAGE_TAG -t $REPOSITORY_URI:$IMAGE_TAG -t $REPOSITORY_URI:latest .
+
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker images to ECR...
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - docker push $REPOSITORY_URI:latest
+      - echo Writing image definitions file for the ECS deploy action...
+      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$REPOSITORY_URI:$IMAGE_TAG" > imagedefinitions.json
+      - cat imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json

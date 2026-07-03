@@ -1,0 +1,12 @@
+{
+  "name": "ecs-demo-app",
+  "version": "1.0.0",
+  "description": "Sample Node.js app for ECS/ECR/CodePipeline demo",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
