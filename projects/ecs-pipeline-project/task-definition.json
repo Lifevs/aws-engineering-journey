@@ -4,11 +4,11 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
-  "executionRoleArn": "arn:aws:iam::660235343407:role/ecsTaskExecutionRole",
+  "executionRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/ecsTaskExecutionRole",
   "containerDefinitions": [
     {
       "name": "ecs-demo-app",
-      "image": "660235343407.dkr.ecr.us-east-1.amazonaws.com/ecs-demo-app:latest",
+      "image": "<AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/ecs-demo-app:latest",
       "essential": true,
       "portMappings": [
         {
@@ -20,7 +20,7 @@
         "logDriver": "awslogs",
         "options": {
           "awslogs-group": "/ecs/ecs-demo-app",
-          "awslogs-region": "us-east-1",
+          "awslogs-region": "<REGION>",
           "awslogs-stream-prefix": "ecs"
         }
       },
