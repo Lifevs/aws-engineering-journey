@@ -12,6 +12,24 @@ const pool = new Pool({
   idleTimeoutMillis: 30000,
 });
 
+async function waitForDb(maxAttempts = 10, delayMs = 1500) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await pool.query('SELECT 1');
+      console.log('Postgres is ready.');
+      return;
+    } catch (err) {
+      console.log(
+        `Postgres not ready yet (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${delayMs}ms...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error(
+    `Could not connect to Postgres after ${maxAttempts} attempts. Is the container running? Check: docker ps`
+  );
+}
+
 async function initSchema() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS products (
@@ -46,4 +64,4 @@ async function updateProductPrice(id, price) {
   return rows[0] || null;
 }
 
-module.exports = { pool, initSchema, getProductById, updateProductPrice };
+module.exports = { pool, waitForDb, initSchema, getProductById, updateProductPrice };

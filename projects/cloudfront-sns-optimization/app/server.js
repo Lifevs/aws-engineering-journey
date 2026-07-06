@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { initSchema, getProductById, updateProductPrice } = require('./db');
+const { waitForDb, initSchema, getProductById, updateProductPrice } = require('./db');
 const { cacheAside, invalidate, getHitRate } = require('./cache');
 const { publishProductEvent } = require('./sns');
 
@@ -77,6 +77,7 @@ app.patch('/products/:id/price', async (req, res) => {
 app.get('/metrics/cache', (req, res) => res.json(getHitRate()));
 
 async function start() {
+  await waitForDb();     // retries with backoff instead of crashing on first attempt
   await initSchema();
   app.listen(PORT, () => console.log(`Listening on :${PORT}`));
 }
