@@ -1,0 +1,30 @@
+{
+  "CachePolicyConfig": {
+    "Name": "product-api-cache-policy",
+    "Comment": "Caches product API responses, keyed by currency query string and Accept-Language header",
+    "DefaultTTL": 60,
+    "MaxTTL": 300,
+    "MinTTL": 0,
+    "ParametersInCacheKeyAndForwardedToOrigin": {
+      "EnableAcceptEncodingGzip": true,
+      "EnableAcceptEncodingBrotli": true,
+      "HeadersConfig": {
+        "HeaderBehavior": "whitelist",
+        "Headers": {
+          "Quantity": 1,
+          "Items": ["Accept-Language"]
+        }
+      },
+      "CookiesConfig": {
+        "CookieBehavior": "none"
+      },
+      "QueryStringsConfig": {
+        "QueryStringBehavior": "whitelist",
+        "QueryStrings": {
+          "Quantity": 1,
+          "Items": ["currency"]
+        }
+      }
+    }
+  }
+}
