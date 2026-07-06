@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFront, EC2 (Node.js), RDS, ElastiCache, and SNS Stack for API Optimization'
+
+Parameters:
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: Password for the PostgreSQL database (min 8 characters)
+    MinLength: 8
+  AlertEmail:
+    Type: String
+    Description: Email address for the SNS subscription testing
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Select your Default VPC
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Select at least two subnets in your Default VPC
+
+Resources:
+  # 1. SNS Topic & Subscription (Replaces create-resources.sh steps 2 & 3)
+  ProductEventsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: product-events
+
+  TopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ProductEventsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+      FilterPolicy:
+        eventType:
+          - price_updated
+        priceChangeType:
+          - increase
+
+  # 2. Security Groups
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP for CloudFront and SSH for troubleshooting
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  DataSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow App Server to access RDS and Redis
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  # 3. Databases (RDS & ElastiCache)
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for RDS
+      SubnetIds: !Ref SubnetIds
+
+  AppDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: postgres
+      EngineVersion: "16"
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      DBName: appdb
+      MasterUsername: postgres
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DataSecurityGroup
+      PubliclyAccessible: false
+
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Subnets for Redis
+      SubnetIds: !Ref SubnetIds
+
+  AppCache:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      Engine: redis
+      CacheNodeType: cache.t3.micro
+      NumCacheNodes: 1
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DataSecurityGroup
+
+  # 4. IAM Role for EC2 to publish to SNS
+  AppInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SNSPublishAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref ProductEventsTopic
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppInstanceRole
+
+  # 5. CloudFront Cache Policy & Distribution (Replaces step 1 and manual attachment)
+  AppCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: product-api-cache-policy
+        Comment: Caches product API responses, keyed by currency query string and Accept-Language header
+        DefaultTTL: 60
+        MaxTTL: 300
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingBrotli: true
+          EnableAcceptEncodingGzip: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Accept-Language
+          QueryStringsConfig:
+            QueryStringBehavior: whitelist
+            QueryStrings:
+              - currency
+
+  AppDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultCacheBehavior:
+          TargetOriginId: EC2Origin
+          ViewerProtocolPolicy: allow-all
+          CachePolicyId: !Ref AppCachePolicy
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+        Origins:
+          - Id: EC2Origin
+            DomainName: !GetAtt AppServer.PublicDnsName
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+
+  # 6. EC2 Instance Application Server
+  AppServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+      IamInstanceProfile: !Ref AppInstanceProfile
+      SecurityGroupIds:
+        - !Ref AppSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Install Node.js & Git
+          dnf update -y
+          dnf install -y git nodejs npm
+
+          # Setup App Directory
+          mkdir -p /opt/app
+          cd /opt/app
+
+          # NOTE: To automatically pull your code, you must push this local project to a public GitHub repo.
+          # Uncomment the line below and replace with your actual repo URL.
+          # git clone https://github.com/your-username/cloudfront-sns-optimization.git .
+          
+          # Install dependencies globally and locally
+          npm install express ioredis pg @aws-sdk/client-sns dotenv pm2 -g
+          npm install pm2@latest -g
+
+          # Create .env dynamically using CF outputs so the app connects automatically
+          cat <<EOF > .env
+          PORT=80
+          PGHOST=${AppDatabase.Endpoint.Address}
+          PGPORT=${AppDatabase.Endpoint.Port}
+          PGUSER=postgres
+          PGPASSWORD=${DBPassword}
+          PGDATABASE=appdb
+          REDIS_HOST=${AppCache.RedisEndpoint.Address}
+          REDIS_PORT=${AppCache.RedisEndpoint.Port}
+          SNS_TOPIC_ARN=${ProductEventsTopic}
+          AWS_REGION=${AWS::Region}
+          EOF
+
+          # Start app on port 80 using PM2 (Uncomment once git clone is configured)
+          # pm2 start server.js --name "api"
+
+Outputs:
+  CloudFrontURL:
+    Description: URL of the CloudFront Distribution
+    Value: !Join ['', ['https://', !GetAtt AppDistribution.DomainName]]
+  EC2PublicIP:
+    Description: Direct Public IP of EC2 (for SSH/Troubleshooting)
+    Value: !GetAtt AppServer.PublicIp
