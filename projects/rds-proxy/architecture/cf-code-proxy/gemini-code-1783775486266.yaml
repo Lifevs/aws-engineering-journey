@@ -1,0 +1,152 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Deploys a Lambda function inside a VPC connected to an RDS Instance via RDS Proxy.'
+
+Parameters:
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: 'The ID of your existing VPC.'
+  
+  PrivateSubnetIds:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Description: 'The private subnets where Lambda and RDS Proxy will reside (must have a route to a NAT Gateway).'
+
+  DBInstanceIdentifier:
+    Type: String
+    Description: 'The identifier of your existing RDS DB Instance (e.g., my-rds-db).'
+
+  DBSecretArn:
+    Type: String
+    Description: 'The ARN of the Secrets Manager secret storing the database credentials.'
+
+Resources:
+
+  # =========================================================================
+  # 1. IAM ROLES
+  # =========================================================================
+  
+  # Lambda Execution Role with VPC Access Permissions
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+
+  # RDS Proxy Role to Read Credentials from Secrets Manager
+  RDSProxyRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: RDSProxySecretAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref DBSecretArn
+
+  # =========================================================================
+  # 2. SECURITY GROUPS (Strict Network Isolation)
+  # =========================================================================
+  
+  # Lambda Security Group (Allows outbound to anything inside/outside VPC)
+  LambdaSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'Security group for VPC-enabled Lambda function'
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  # RDS Proxy Security Group (ONLY allows inbound from the Lambda SG)
+  RDSProxySecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'Security group for RDS Proxy'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432 # Change to 3306 if you are using MySQL/Aurora MySQL
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  # =========================================================================
+  # 3. RDS PROXY & TARGET GROUP
+  # =========================================================================
+  
+  # The RDS Proxy
+  RDSProxy:
+    Type: 'AWS::RDS::DBProxy'
+    Properties:
+      DBProxyName: 'app-rds-proxy'
+      EngineFamily: 'POSTGRESQL' # Change to 'MYSQL' if applicable
+      RoleArn: !GetAtt RDSProxyRole.Arn
+      VpcSubnetIds: !Ref PrivateSubnetIds
+      VpcSecurityGroupIds:
+        - !Ref RDSProxySecurityGroup
+      Auth:
+        - AuthScheme: 'SECRETS'
+          SecretArn: !Ref DBSecretArn
+          IAMAuth: 'DISABLED'
+
+  # Connects the Proxy to the actual RDS Database Instance
+  RDSProxyTargetGroup:
+    Type: 'AWS::RDS::DBProxyTargetGroup'
+    Properties:
+      DBProxyName: !Ref RDSProxy
+      TargetGroupName: 'default'
+      DBInstanceIdentifiers:
+        - !Ref DBInstanceIdentifier
+
+  # =========================================================================
+  # 4. LAMBDA FUNCTION
+  # =========================================================================
+  
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    DependsOn: RDSProxyTargetGroup
+    Properties:
+      FunctionName: 'vpc-rds-proxy-processor'
+      Handler: 'index.handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: 'nodejs20.x'
+      MemorySize: 1024 # Tuned memory to minimize cold start latency
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds: !Ref PrivateSubnetIds
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt RDSProxy.Endpoint
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              console.log("Proxy Endpoint Target:", process.env.DB_HOST);
+              return {
+                  statusCode: 200,
+                  body: JSON.stringify({ message: "Lambda VPC Proxy Integration Successful" })
+              };
+          };
+
+Outputs:
+  ProxyEndpoint:
+    Description: 'The connection endpoint for the RDS Proxy'
+    Value: !GetAtt RDSProxy.Endpoint
