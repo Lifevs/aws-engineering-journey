@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Fargate calling Lambda via Function URL with DynamoDB backend for Observability & Chaos Testing.'
+
+Resources:
+  # ==========================================
+  # NETWORKING LAYER
+  # ==========================================
+  LabVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ObservabilityLabVPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref LabVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LabVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LabVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow outbound traffic for ECS tasks
+      VpcId: !Ref LabVPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # ==========================================
+  # STATE LAYER (DYNAMODB)
+  # ==========================================
+  LabDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ObservabilityLabMetrics
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      # Provisioned throughput makes it easy to test throttling failures
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  # ==========================================
+  # COMPUTE LAYER: LAMBDA + FUNCTION URL
+  # ==========================================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBWritePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt LabDynamoDBTable.Arn
+
+  LabLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ObservabilityLabReceiver
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.11
+      Timeout: 5  # Low timeout value to test timeout failures easily
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref LabDynamoDBTable
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import uuid
+          import boto3
+          import time
+
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table(os.environ['TABLE_NAME'])
+
+          def lambda_handler(event, context):
+              # Simulate standard processing work
+              # (You can add time.sleep(6) here to trigger a timeout failure)
+              
+              record_id = str(uuid.uuid4())
+              
+              try:
+                  table.put_item(Item={'id': record_id, 'timestamp': str(time.time())})
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({'status': 'Success', 'inserted_id': record_id})
+                  }
+              except Exception as e:
+                  print(f"Error occurred: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'status': 'Error', 'message': str(e)})
+                  }
+
+  LabLambdaFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref LabLambdaFunction
+      AuthType: NONE  # Publicly accessible endpoint for easy curling
+
+  LabLambdaFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LabLambdaFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  # ==========================================
+  # COMPUTE LAYER: ECS FARGATE
+  # ==========================================
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: ObservabilityLabCluster
+
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/observability-lab-worker
+      RetentionInDays: 7
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  LabTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: observability-lab-worker
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: curl-worker
+          Image: curlimages/curl:latest
+          # The container continuously triggers the Lambda URL every 2 seconds
+          Command:
+            - sh
+            - -c
+            - |
+              while true; do 
+                echo "Invoking Lambda Function URL..."
+                curl -s -X POST $LAMBDA_URL -d '{"trigger":"ecs"}' -w "\nHTTP Status: %{http_code}\n"
+                sleep 2
+              done
+          Environment:
+            - Name: LAMBDA_URL
+              Value: !GetAtt LabLambdaFunctionUrl.FunctionUrl
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudWatchLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  LabECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: ObservabilityLabService
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref LabTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PublicSubnet
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+          AssignPublicIp: ENABLED
+
+Outputs:
+  LambdaFunctionURL:
+    Description: "The public URL for your Lambda function"
+    Value: !GetAtt LabLambdaFunctionUrl.FunctionUrl
