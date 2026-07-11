@@ -1,0 +1,48 @@
+schema {
+    query: Query
+    mutation: Mutation
+    subscription: Subscription
+}
+
+type Order {
+    orderId: ID!
+    customerId: String!
+    items: [String!]!
+    amount: Float!
+    status: String!
+    statusMessage: String
+    createdAt: String!
+    updatedAt: String!
+}
+
+input CreateOrderInput {
+    customerId: String!
+    items: [String!]!
+    amount: Float!
+}
+
+input OrderUpdateInput {
+    orderId: ID!
+    status: String!
+    statusMessage: String
+}
+
+type Query {
+    getOrder(orderId: ID!): Order
+    listOrdersByCustomer(customerId: String!): [Order!]!
+}
+
+type Mutation {
+    # Kicks off the Step Functions orchestration workflow via a Lambda resolver
+    createOrder(input: CreateOrderInput!): Order
+
+    # Called internally by each Step Functions task (Lambda) to update state.
+    # This is a plain DynamoDB resolver — its execution is what the
+    # subscription below listens for.
+    publishOrderUpdate(input: OrderUpdateInput!): Order
+}
+
+type Subscription {
+    onOrderUpdate(orderId: ID!): Order
+        @aws_subscribe(mutations: ["publishOrderUpdate"])
+}
