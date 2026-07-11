@@ -1,0 +1,328 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Full Stack Deployment: VPC, NAT Gateway, Multi-AZ Private Subnets, Secret, RDS Instance, RDS Proxy, and Lambda.'
+
+Resources:
+
+  # =========================================================================
+  # 1. NETWORK TOPOLOGY (VPC, IGW, & NAT GATEWAY)
+  # =========================================================================
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: 'project-vpc'
+
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: 'project-igw'
+
+  VPCGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnets (For NAT Gateway & Public Facing Resources)
+  PublicSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: !Select [0, !GetAZs ''] # Dynamically picks 1st AZ
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: 'project-public-subnet-1'
+
+  PublicSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.2.0/24'
+      AvailabilityZone: !Select [1, !GetAZs ''] # Dynamically picks 2nd AZ
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: 'project-public-subnet-2'
+
+  # Private Subnets (Error Mitigation: Formally separated across 2 AZs for RDS)
+  PrivateSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.11.0/24'
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: 'project-private-subnet-1'
+
+  PrivateSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: '10.0.12.0/24'
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: 'project-private-subnet-2'
+
+  # Elastic IP and NAT Gateway for Private Subnet Outbound Internet Routing
+  NatEip:
+    Type: 'AWS::EC2::EIP'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: 'AWS::EC2::NatGateway'
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: 'project-nat-gateway'
+
+  # =========================================================================
+  # 2. ROUTE TABLES & EXPLICIT ASSOCIATIONS (Prevents IGW Fallback Leaks)
+  # =========================================================================
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 'project-public-rt'
+
+  PublicRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1Association:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2Association:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 'project-private-rt'
+
+  PrivateRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: NatGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
+  # Explicitly bind private subnets so they never drop back to Main Route Table
+  PrivateSubnet1Association:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2Association:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # =========================================================================
+  # 3. SECRETS MANAGER & SECURITY GROUPS
+  # =========================================================================
+  DBSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: 'app-db-credentials-secret-v2'
+      Description: 'Master credentials for the RDS instance'
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "postgresadmin"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        ExcludeCharacters: '"@/\'
+
+  DBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: 'Subnet group covering multiple AZs'
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  LambdaSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'Security group for VPC-enabled Lambda function'
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+
+  RDSProxySecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'Security group for RDS Proxy'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  DBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'Security group for backend RDS Instance'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref RDSProxySecurityGroup
+
+  # =========================================================================
+  # 4. RDS DATABASE INSTANCE (Error Mitigation: Fixed Deletion Policy)
+  # =========================================================================
+  RDSInstance:
+    Type: 'AWS::RDS::DBInstance'
+    DeletionPolicy: Delete
+    Properties:
+      AllocatedStorage: '20'
+      DBInstanceClass: 'db.t4g.micro'
+      DBInstanceIdentifier: 'app-postgres-database-v2'
+      Engine: 'postgres'
+      EngineVersion: '15'
+      MasterUsername: 'postgresadmin'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DBSecret}:SecretString:password}}'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      PubliclyAccessible: false
+      DeletionProtection: false
+
+  # =========================================================================
+  # 5. IAM ROLES & PERMISSIONS
+  # =========================================================================
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+
+  RDSProxyRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: RDSProxySecretAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'secretsmanager:GetSecretValue'
+                Resource: !Ref DBSecret
+
+  # =========================================================================
+  # 6. RDS PROXY & TARGET GROUP
+  # =========================================================================
+  RDSProxy:
+    Type: 'AWS::RDS::DBProxy'
+    Properties:
+      DBProxyName: 'app-rds-proxy-v2'
+      EngineFamily: 'POSTGRESQL'
+      RoleArn: !GetAtt RDSProxyRole.Arn
+      VpcSubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      VpcSecurityGroupIds:
+        - !Ref RDSProxySecurityGroup
+      Auth:
+        - AuthScheme: 'SECRETS'
+          SecretArn: !Ref DBSecret
+          IAMAuth: 'DISABLED'
+
+  RDSProxyTargetGroup:
+    Type: 'AWS::RDS::DBProxyTargetGroup'
+    Properties:
+      DBProxyName: !Ref RDSProxy
+      TargetGroupName: 'default'
+      DBInstanceIdentifiers:
+        - !Ref RDSInstance
+
+  # =========================================================================
+  # 7. LAMBDA FUNCTION (Tuned Performance Setup)
+  # =========================================================================
+  LambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    DependsOn: RDSProxyTargetGroup
+    Properties:
+      FunctionName: 'vpc-rds-proxy-processor-v2'
+      Handler: 'index.handler'
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: 'nodejs20.x'
+      MemorySize: 1024
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt RDSProxy.Endpoint
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              console.log("Routing Queries to Proxy:", process.env.DB_HOST);
+              return {
+                  statusCode: 200,
+                  body: JSON.stringify({ message: "Infrastructure stack operational." })
+              };
+          };
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+  ProxyEndpoint:
+    Value: !GetAtt RDSProxy.Endpoint
