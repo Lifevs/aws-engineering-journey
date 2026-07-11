@@ -1,0 +1,615 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  DVA-C02 practice project - AppSync GraphQL API with real-time subscriptions,
+  backed by a Step Functions order-processing workflow, DynamoDB, and Lambda.
+  Pure CloudFormation - no packaging step required (Lambda code is inline).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: order-workflow
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # DynamoDB
+  # ---------------------------------------------------------------------
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-orders"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+        - AttributeName: customerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: CustomerIndex
+          KeySchema:
+            - AttributeName: customerId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # ---------------------------------------------------------------------
+  # AppSync API
+  # ---------------------------------------------------------------------
+  GraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name: !Sub "${ProjectName}-api"
+      AuthenticationType: API_KEY
+      XrayEnabled: true
+
+  GraphQLApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Description: Dev/test key (default 7 day expiry)
+
+  GraphQLSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Definition: |
+        schema {
+            query: Query
+            mutation: Mutation
+            subscription: Subscription
+        }
+
+        type Order {
+            orderId: ID!
+            customerId: String!
+            items: [String!]!
+            amount: Float!
+            status: String!
+            statusMessage: String
+            createdAt: String!
+            updatedAt: String!
+        }
+
+        input CreateOrderInput {
+            customerId: String!
+            items: [String!]!
+            amount: Float!
+        }
+
+        input OrderUpdateInput {
+            orderId: ID!
+            status: String!
+            statusMessage: String
+        }
+
+        type Query {
+            getOrder(orderId: ID!): Order
+            listOrdersByCustomer(customerId: String!): [Order!]!
+        }
+
+        type Mutation {
+            createOrder(input: CreateOrderInput!): Order
+            publishOrderUpdate(input: OrderUpdateInput!): Order
+        }
+
+        type Subscription {
+            onOrderUpdate(orderId: ID!): Order
+                @aws_subscribe(mutations: ["publishOrderUpdate"])
+        }
+
+  # ---------------------------------------------------------------------
+  # AppSync -> DynamoDB data source
+  # ---------------------------------------------------------------------
+  AppSyncDynamoDBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: appsync.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt OrdersTable.Arn
+                  - !Sub "${OrdersTable.Arn}/index/*"
+
+  OrdersTableDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Name: OrdersTableDataSource
+      Type: AMAZON_DYNAMODB
+      DynamoDBConfig:
+        TableName: !Ref OrdersTable
+        AwsRegion: !Ref AWS::Region
+      ServiceRoleArn: !GetAtt AppSyncDynamoDBRole.Arn
+
+  # ---------------------------------------------------------------------
+  # AppSync -> Lambda data source (createOrder resolver)
+  # ---------------------------------------------------------------------
+  AppSyncLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: appsync.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeLambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt StartWorkflowFunction.Arn
+
+  StartWorkflowDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Name: StartWorkflowDataSource
+      Type: AWS_LAMBDA
+      LambdaConfig:
+        LambdaFunctionArn: !GetAtt StartWorkflowFunction.Arn
+      ServiceRoleArn: !GetAtt AppSyncLambdaRole.Arn
+
+  # ---------------------------------------------------------------------
+  # Resolvers
+  # ---------------------------------------------------------------------
+  GetOrderResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      TypeName: Query
+      FieldName: getOrder
+      DataSourceName: !GetAtt OrdersTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+            "version": "2018-05-29",
+            "operation": "GetItem",
+            "key": { "orderId": $util.dynamodb.toDynamoDBJson($ctx.args.orderId) }
+        }
+      ResponseMappingTemplate: |
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)
+
+  ListOrdersByCustomerResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      TypeName: Query
+      FieldName: listOrdersByCustomer
+      DataSourceName: !GetAtt OrdersTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+            "version": "2018-05-29",
+            "operation": "Query",
+            "index": "CustomerIndex",
+            "query": {
+                "expression": "customerId = :customerId",
+                "expressionValues": {
+                    ":customerId": $util.dynamodb.toDynamoDBJson($ctx.args.customerId)
+                }
+            }
+        }
+      ResponseMappingTemplate: |
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result.items)
+
+  CreateOrderResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      TypeName: Mutation
+      FieldName: createOrder
+      DataSourceName: !GetAtt StartWorkflowDataSource.Name
+      RequestMappingTemplate: |
+        {
+            "version": "2017-02-28",
+            "operation": "Invoke",
+            "payload": $util.toJson($ctx)
+        }
+      ResponseMappingTemplate: |
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)
+
+  PublishOrderUpdateResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      TypeName: Mutation
+      FieldName: publishOrderUpdate
+      DataSourceName: !GetAtt OrdersTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+            "version": "2018-05-29",
+            "operation": "UpdateItem",
+            "key": { "orderId": $util.dynamodb.toDynamoDBJson($ctx.args.input.orderId) },
+            "update": {
+                "expression": "SET #status = :status, statusMessage = :msg, updatedAt = :now",
+                "expressionNames": { "#status": "status" },
+                "expressionValues": {
+                    ":status": $util.dynamodb.toDynamoDBJson($ctx.args.input.status),
+                    ":msg": $util.dynamodb.toDynamoDBJson($util.defaultIfNull($ctx.args.input.statusMessage, "")),
+                    ":now": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601())
+                }
+            }
+        }
+      ResponseMappingTemplate: |
+        #if($ctx.error)
+            $util.error($ctx.error.message, $ctx.error.type)
+        #end
+        $util.toJson($ctx.result)
+
+  # ---------------------------------------------------------------------
+  # Lambda execution roles
+  # ---------------------------------------------------------------------
+  StartWorkflowFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: StartWorkflowAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:PutItem
+                Resource: !GetAtt OrdersTable.Arn
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ProjectName}-workflow"
+
+  WorkflowStepFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # ---------------------------------------------------------------------
+  # Lambda: AppSync resolver that kicks off the Step Functions execution
+  # ---------------------------------------------------------------------
+  StartWorkflowFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-start-workflow"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt StartWorkflowFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref OrdersTable
+          STATE_MACHINE_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ProjectName}-workflow"
+      Code:
+        ZipFile: |
+          import json, os, uuid, time, decimal, boto3
+
+          def handler(event, context):
+              args = event["arguments"]["input"]
+              order_id = str(uuid.uuid4())
+              now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+              item = {
+                  "orderId": order_id,
+                  "customerId": args["customerId"],
+                  "items": args["items"],
+                  "amount": decimal.Decimal(str(args["amount"])),
+                  "status": "PENDING",
+                  "statusMessage": "Order received",
+                  "createdAt": now,
+                  "updatedAt": now,
+              }
+              table = boto3.resource("dynamodb").Table(os.environ["TABLE_NAME"])
+              table.put_item(Item=item)
+
+              sf = boto3.client("stepfunctions")
+              sf.start_execution(
+                  stateMachineArn=os.environ["STATE_MACHINE_ARN"],
+                  input=json.dumps({"orderId": order_id, "amount": args["amount"]}),
+              )
+              item["amount"] = float(item["amount"])
+              return item
+
+  # ---------------------------------------------------------------------
+  # Lambda: Step Functions task functions
+  # Each one performs its business step, then calls the publishOrderUpdate
+  # mutation over HTTPS (API key auth) so the change lands in DynamoDB
+  # AND fires the onOrderUpdate subscription in one round trip.
+  # ---------------------------------------------------------------------
+  ValidateOrderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-validate-order"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt WorkflowStepFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          APPSYNC_URL: !GetAtt GraphQLApi.GraphQLUrl
+          APPSYNC_API_KEY: !GetAtt GraphQLApiKey.ApiKey
+      Code:
+        ZipFile: |
+          import json, os, urllib.request
+
+          def publish(order_id, status, msg=""):
+              query = "mutation P($i:OrderUpdateInput!){publishOrderUpdate(input:$i){orderId status}}"
+              body = json.dumps({"query": query,
+                  "variables": {"i": {"orderId": order_id, "status": status, "statusMessage": msg}}}).encode()
+              req = urllib.request.Request(os.environ["APPSYNC_URL"], data=body,
+                  headers={"Content-Type": "application/json", "x-api-key": os.environ["APPSYNC_API_KEY"]})
+              urllib.request.urlopen(req, timeout=5)
+
+          def handler(event, context):
+              order_id = event["orderId"]
+              amount = event.get("amount", 0)
+              if amount <= 0:
+                  raise Exception("ValidationError: amount must be positive")
+              publish(order_id, "VALIDATED", "Order passed validation")
+              return event
+
+  ProcessPaymentFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-process-payment"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt WorkflowStepFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          APPSYNC_URL: !GetAtt GraphQLApi.GraphQLUrl
+          APPSYNC_API_KEY: !GetAtt GraphQLApiKey.ApiKey
+      Code:
+        ZipFile: |
+          import json, os, random, urllib.request
+
+          def publish(order_id, status, msg=""):
+              query = "mutation P($i:OrderUpdateInput!){publishOrderUpdate(input:$i){orderId status}}"
+              body = json.dumps({"query": query,
+                  "variables": {"i": {"orderId": order_id, "status": status, "statusMessage": msg}}}).encode()
+              req = urllib.request.Request(os.environ["APPSYNC_URL"], data=body,
+                  headers={"Content-Type": "application/json", "x-api-key": os.environ["APPSYNC_API_KEY"]})
+              urllib.request.urlopen(req, timeout=5)
+
+          def handler(event, context):
+              order_id = event["orderId"]
+              if random.random() < 0.05:
+                  raise Exception("PaymentError: card declined")
+              publish(order_id, "PAYMENT_PROCESSED", "Payment charged successfully")
+              return event
+
+  UpdateInventoryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-update-inventory"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt WorkflowStepFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          APPSYNC_URL: !GetAtt GraphQLApi.GraphQLUrl
+          APPSYNC_API_KEY: !GetAtt GraphQLApiKey.ApiKey
+      Code:
+        ZipFile: |
+          import json, os, urllib.request
+
+          def publish(order_id, status, msg=""):
+              query = "mutation P($i:OrderUpdateInput!){publishOrderUpdate(input:$i){orderId status}}"
+              body = json.dumps({"query": query,
+                  "variables": {"i": {"orderId": order_id, "status": status, "statusMessage": msg}}}).encode()
+              req = urllib.request.Request(os.environ["APPSYNC_URL"], data=body,
+                  headers={"Content-Type": "application/json", "x-api-key": os.environ["APPSYNC_API_KEY"]})
+              urllib.request.urlopen(req, timeout=5)
+
+          def handler(event, context):
+              order_id = event["orderId"]
+              publish(order_id, "INVENTORY_UPDATED", "Inventory reserved")
+              return event
+
+  ShipOrderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-ship-order"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt WorkflowStepFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          APPSYNC_URL: !GetAtt GraphQLApi.GraphQLUrl
+          APPSYNC_API_KEY: !GetAtt GraphQLApiKey.ApiKey
+      Code:
+        ZipFile: |
+          import json, os, urllib.request
+
+          def publish(order_id, status, msg=""):
+              query = "mutation P($i:OrderUpdateInput!){publishOrderUpdate(input:$i){orderId status}}"
+              body = json.dumps({"query": query,
+                  "variables": {"i": {"orderId": order_id, "status": status, "statusMessage": msg}}}).encode()
+              req = urllib.request.Request(os.environ["APPSYNC_URL"], data=body,
+                  headers={"Content-Type": "application/json", "x-api-key": os.environ["APPSYNC_API_KEY"]})
+              urllib.request.urlopen(req, timeout=5)
+
+          def handler(event, context):
+              order_id = event["orderId"]
+              publish(order_id, "SHIPPED", "Order shipped")
+              return event
+
+  NotifyFailureFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-notify-failure"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt WorkflowStepFunctionRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          APPSYNC_URL: !GetAtt GraphQLApi.GraphQLUrl
+          APPSYNC_API_KEY: !GetAtt GraphQLApiKey.ApiKey
+      Code:
+        ZipFile: |
+          import json, os, urllib.request
+
+          def publish(order_id, status, msg=""):
+              query = "mutation P($i:OrderUpdateInput!){publishOrderUpdate(input:$i){orderId status}}"
+              body = json.dumps({"query": query,
+                  "variables": {"i": {"orderId": order_id, "status": status, "statusMessage": msg}}}).encode()
+              req = urllib.request.Request(os.environ["APPSYNC_URL"], data=body,
+                  headers={"Content-Type": "application/json", "x-api-key": os.environ["APPSYNC_API_KEY"]})
+              urllib.request.urlopen(req, timeout=5)
+
+          def handler(event, context):
+              order_id = event.get("orderId", "unknown")
+              error = event.get("error", {})
+              cause = error.get("Cause", str(error))[:200] if isinstance(error, dict) else str(error)[:200]
+              publish(order_id, "FAILED", cause)
+              return event
+
+  # ---------------------------------------------------------------------
+  # Step Functions state machine
+  # ---------------------------------------------------------------------
+  StateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeStepLambdas
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ValidateOrderFunction.Arn
+                  - !GetAtt ProcessPaymentFunction.Arn
+                  - !GetAtt UpdateInventoryFunction.Arn
+                  - !GetAtt ShipOrderFunction.Arn
+                  - !GetAtt NotifyFailureFunction.Arn
+
+  OrderWorkflowStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${ProjectName}-workflow"
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StateMachineRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Order processing orchestration - exercises Task, Retry, Catch",
+          "StartAt": "ValidateOrder",
+          "States": {
+            "ValidateOrder": {
+              "Type": "Task",
+              "Resource": "${ValidateOrderFunction.Arn}",
+              "Retry": [
+                { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 2, "MaxAttempts": 2, "BackoffRate": 2.0 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }
+              ],
+              "Next": "ProcessPayment"
+            },
+            "ProcessPayment": {
+              "Type": "Task",
+              "Resource": "${ProcessPaymentFunction.Arn}",
+              "Retry": [
+                { "ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2.0 }
+              ],
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }
+              ],
+              "Next": "UpdateInventory"
+            },
+            "UpdateInventory": {
+              "Type": "Task",
+              "Resource": "${UpdateInventoryFunction.Arn}",
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }
+              ],
+              "Next": "ShipOrder"
+            },
+            "ShipOrder": {
+              "Type": "Task",
+              "Resource": "${ShipOrderFunction.Arn}",
+              "Catch": [
+                { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }
+              ],
+              "End": true
+            },
+            "NotifyFailure": {
+              "Type": "Task",
+              "Resource": "${NotifyFailureFunction.Arn}",
+              "Next": "WorkflowFailed"
+            },
+            "WorkflowFailed": {
+              "Type": "Fail",
+              "Error": "OrderWorkflowFailed"
+            }
+          }
+        }
+
+Outputs:
+  GraphQLApiUrl:
+    Description: AppSync GraphQL HTTPS endpoint
+    Value: !GetAtt GraphQLApi.GraphQLUrl
+  GraphQLRealtimeUrl:
+    Description: AppSync real-time (WSS) endpoint for subscriptions
+    Value: !GetAtt GraphQLApi.RealtimeUrl
+  GraphQLApiId:
+    Value: !GetAtt GraphQLApi.ApiId
+  GraphQLApiKeyOutput:
+    Description: API key for testing (x-api-key header)
+    Value: !GetAtt GraphQLApiKey.ApiKey
+  OrdersTableName:
+    Value: !Ref OrdersTable
+  StateMachineArn:
+    Value: !Ref OrderWorkflowStateMachine
