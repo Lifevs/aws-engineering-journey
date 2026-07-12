@@ -5,7 +5,7 @@ set -e
 
 STACK_NAME="mtsaas-lab"
 REGION="ap-south-1"          # change to your region
-TEMPLATE="multi-tenant-isolation.yaml"
+TEMPLATE="../infrastructure/multi-tenant-isolation.yaml"
 
 echo "== 1. Deploying CloudFormation stack =="
 aws cloudformation deploy \
