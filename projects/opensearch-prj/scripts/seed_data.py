@@ -14,6 +14,7 @@ import random
 import time
 import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 TABLE_NAME = os.environ.get("TABLE_NAME", "dynamo-opensearch-lab-products")
 REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -84,7 +85,7 @@ def build_items():
                 "name": name,
                 "description": description,
                 "category": category,
-                "price": round(random.uniform(9.99, 349.99), 2),
+                "price": Decimal(str(round(random.uniform(9.99, 349.99), 2))),
                 "tags": f"{category} {name.split()[0].lower()} popular",
                 "createdAt": created.isoformat() + "Z",
             })
