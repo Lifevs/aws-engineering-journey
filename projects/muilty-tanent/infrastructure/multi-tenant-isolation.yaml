@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Multi-tenant SaaS data isolation lab (DVA-C02 hands-on).
+  Cognito User Pool (custom:tenant_id) -> Identity Pool Principal Tags ->
+  IAM ABAC condition (dynamodb:LeadingKeys) -> DynamoDB tenant-partitioned table.
+  100% within AWS Free Tier for light testing (PAY_PER_REQUEST, no PITR, no VPC).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mtsaas-lab
+
+Resources:
+
+  ############################
+  # DynamoDB (tenant-partitioned)
+  ############################
+  TenantDataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-data'
+      BillingMode: PAY_PER_REQUEST          # no idle cost
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH                     # pk == tenant_id (exact match, required by LeadingKeys)
+        - AttributeName: sk
+          KeyType: RANGE                    # sk == "ORDER#123", "PROFILE#user1", etc.
+      SSESpecification:
+        SSEEnabled: true                    # AWS-owned key, free
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false   # keep off to stay free-tier
+
+  ############################
+  # Cognito User Pool
+  ############################
+  TenantUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${ProjectName}-users'
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: tenant_id
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+
+  TenantUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${ProjectName}-client'
+      UserPoolId: !Ref TenantUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+  ############################
+  # Cognito Identity Pool
+  ############################
+  TenantIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub '${ProjectName}-idpool'
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref TenantUserPoolClient
+          ProviderName: !GetAtt TenantUserPool.ProviderName
+          ServerSideTokenCheck: true
+
+  # Maps the custom:tenant_id claim from the ID token into a Principal Tag
+  # so it can be referenced in IAM policy as ${aws:PrincipalTag/tenant_id}
+  TenantIdentityPoolPrincipalTag:
+    Type: AWS::Cognito::IdentityPoolPrincipalTag
+    Properties:
+      IdentityPoolId: !Ref TenantIdentityPool
+      IdentityProviderName: !GetAtt TenantUserPool.ProviderName
+      PrincipalTags:
+        tenant_id: 'custom:tenant_id'
+      UseDefaults: false
+
+  ############################
+  # IAM Role assumed by authenticated tenant users (ABAC)
+  ############################
+  AuthenticatedTenantRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-authenticated-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                'cognito-identity.amazonaws.com:aud': !Ref TenantIdentityPool
+              'ForAnyValue:StringLike':
+                'cognito-identity.amazonaws.com:amr': authenticated
+      Policies:
+        - PolicyName: TenantScopedDynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowOwnTenantPartitionOnly
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource: !GetAtt TenantDataTable.Arn
+                Condition:
+                  'ForAllValues:StringEquals':
+                    'dynamodb:LeadingKeys':
+                      - '${aws:PrincipalTag/tenant_id}'
+              - Sid: DenyIfNoTenantTag
+                Effect: Deny
+                Action: 'dynamodb:*'
+                Resource: !GetAtt TenantDataTable.Arn
+                Condition:
+                  'Null':
+                    'aws:PrincipalTag/tenant_id': 'true'
+
+  TenantIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref TenantIdentityPool
+      Roles:
+        authenticated: !GetAtt AuthenticatedTenantRole.Arn
+
+Outputs:
+  UserPoolId:
+    Value: !Ref TenantUserPool
+  UserPoolClientId:
+    Value: !Ref TenantUserPoolClient
+  IdentityPoolId:
+    Value: !Ref TenantIdentityPool
+  TableName:
+    Value: !Ref TenantDataTable
+  AuthenticatedRoleArn:
+    Value: !GetAtt AuthenticatedTenantRole.Arn
+  Region:
+    Value: !Ref AWS::Region

@@ -1,0 +1,4 @@
+.env
+*.pem
+.DS_Store
+aws-exports.json
