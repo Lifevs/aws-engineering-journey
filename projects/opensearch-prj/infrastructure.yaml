@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Project 19 - DynamoDB Streams -> Lambda -> OpenSearch full-text index,
+  with a search API on top. Built for low-cost hands-on DVA-C02 practice.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: dynamo-opensearch-lab
+
+  OpenSearchInstanceType:
+    Type: String
+    Default: t3.small.search
+    AllowedValues:
+      - t3.small.search
+      - t3.medium.search
+
+  OpenSearchVolumeSize:
+    Type: Number
+    Default: 10
+
+  MasterUserName:
+    Type: String
+    Default: labadmin
+
+  MasterUserPassword:
+    Type: String
+    NoEcho: true
+    Description: Must be 8+ chars, include upper/lower/number/symbol.
+    MinLength: 8
+
+Resources:
+
+  ############################
+  # DynamoDB Table
+  ############################
+  ProductsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-products'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  ############################
+  # OpenSearch Domain (single-node, low cost)
+  ############################
+  OpenSearchDomain:
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: !Sub '${ProjectName}-search'
+      EngineVersion: 'OpenSearch_2.13'
+      ClusterConfig:
+        InstanceType: !Ref OpenSearchInstanceType
+        InstanceCount: 1
+        DedicatedMasterEnabled: false
+        ZoneAwarenessEnabled: false
+      EBSOptions:
+        EBSEnabled: true
+        VolumeType: gp3
+        VolumeSize: !Ref OpenSearchVolumeSize
+      EncryptionAtRestOptions:
+        Enabled: true
+      NodeToNodeEncryptionOptions:
+        Enabled: true
+      DomainEndpointOptions:
+        EnforceHTTPS: true
+      AdvancedSecurityOptions:
+        Enabled: true
+        InternalUserDatabaseEnabled: true
+        MasterUserOptions:
+          MasterUserName: !Ref MasterUserName
+          MasterUserPassword: !Ref MasterUserPassword
+      AccessPolicies:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: '*'
+            Action: 'es:ESHttp*'
+            Resource: !Sub 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${ProjectName}-search/*'
+      # Fine-grained access control (master user) handles authZ, so the
+      # resource-based policy above stays wildcard on principal but is still
+      # gated by HTTPS + FGAC login. This sidesteps the Lambda-role <-> domain
+      # circular dependency you'd otherwise hit referencing role ARNs here.
+
+  ############################
+  # Indexer Lambda (DynamoDB Streams -> OpenSearch)
+  ############################
+  IndexerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: stream-and-logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !GetAtt ProductsTable.StreamArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
+  IndexerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-indexer'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt IndexerLambdaRole.Arn
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !GetAtt OpenSearchDomain.DomainEndpoint
+          OPENSEARCH_USER: !Ref MasterUserName
+          OPENSEARCH_PASS: !Ref MasterUserPassword
+          INDEX_NAME: products
+      Code:
+        ZipFile: |
+          exports.handler = async () => {
+            return { statusCode: 200, body: 'placeholder - replace with lambda-indexer/index.mjs via package-and-deploy.sh' };
+          };
+
+  IndexerEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt ProductsTable.StreamArn
+      FunctionName: !Ref IndexerFunction
+      StartingPosition: LATEST
+      BatchSize: 10
+      MaximumRetryAttempts: 3
+      BisectBatchOnFunctionError: true
+
+  ############################
+  # Search API Lambda + HTTP API
+  ############################
+  SearchApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: logs-only
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: 'arn:aws:logs:*:*:*'
+
+  SearchApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-search-api'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Timeout: 15
+      MemorySize: 256
+      Role: !GetAtt SearchApiRole.Arn
+      Environment:
+        Variables:
+          OPENSEARCH_ENDPOINT: !GetAtt OpenSearchDomain.DomainEndpoint
+          OPENSEARCH_USER: !Ref MasterUserName
+          OPENSEARCH_PASS: !Ref MasterUserPassword
+          INDEX_NAME: products
+      Code:
+        ZipFile: |
+          exports.handler = async () => {
+            return { statusCode: 200, body: 'placeholder - replace with lambda-search-api/index.mjs via package-and-deploy.sh' };
+          };
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ProjectName}-api'
+      ProtocolType: HTTP
+
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt SearchApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  ApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /search'
+      Target: !Sub 'integrations/${ApiIntegration}'
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+
+  ApiInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SearchApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/search'
+
+Outputs:
+  TableName:
+    Value: !Ref ProductsTable
+  StreamArn:
+    Value: !GetAtt ProductsTable.StreamArn
+  OpenSearchDashboard:
+    Value: !Sub 'https://${OpenSearchDomain.DomainEndpoint}/_dashboards/'
+  OpenSearchEndpoint:
+    Value: !GetAtt OpenSearchDomain.DomainEndpoint
+  ApiEndpoint:
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/search'
+  IndexerFunctionName:
+    Value: !Ref IndexerFunction
+  SearchApiFunctionName:
+    Value: !Ref SearchApiFunction
